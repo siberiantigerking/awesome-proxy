@@ -1,0 +1,90 @@
+{
+  "name": "awesome-proxy",
+  "version": "1.0.0",
+  "description": "Awesome Proxy - a proxy manager GUI for sing-box core",
+  "author": "Awesome Proxy",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "vite",
+    "web:dev": "node server/index.js",
+    "web:ui": "vite --config vite.config.web.ts",
+    "server": "node server/index.js",
+    "build": "tsc && vite build && tsc -p tsconfig.electron.json",
+    "icons": "node scripts/make-icons.cjs",
+    "preview": "vite preview",
+    "electron:dev": "vite --config vite.config.ts",
+    "electron:build": "npm run build && electron-builder",
+    "lint": "eslint src --ext ts,tsx"
+  },
+  "dependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "cors": "^2.8.5",
+    "electron-store": "^8.2.0",
+    "express": "^4.21.0",
+    "js-yaml": "^4.1.0",
+    "jsqr": "^1.4.0",
+    "lucide-react": "^0.400.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "recharts": "^2.12.7",
+    "ws": "^8.17.0",
+    "zustand": "^4.5.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.2",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "autoprefixer": "^10.4.19",
+    "electron": "^31.0.2",
+    "electron-builder": "^24.13.3",
+    "jimp": "^1.6.0",
+    "png-to-ico": "^2.1.8",
+    "postcss": "^8.4.38",
+    "tailwindcss": "^3.4.4",
+    "typescript": "^5.5.2",
+    "vite": "^5.3.1",
+    "vite-plugin-electron": "^0.28.7",
+    "vite-plugin-electron-renderer": "^0.14.5"
+  },
+  "build": {
+    "appId": "com.awesome-proxy",
+    "productName": "Awesome Proxy",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "shared/**/*",
+      "resources/**/*"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "resources/icon.ico",
+      "signAndEditExecutable": false,
+      "forceCodeSigning": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "extraResources": [
+      {
+        "from": "resources/bin",
+        "to": "bin",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,21 @@
+node_modules/
+dist/
+dist-electron/
+release/
+*.log
+.DS_Store
+Thumbs.db
+
+# sing-box runtime cache (BoltDB) — contains real node tags / selector state
+# from local testing, never bundled into the app, never commit it.
+cache.db
+
+# Generated config written at runtime by dev-mode runs.
+sing-box-config.json
+
+# electron-builder stdout captured during manual builds.
+builder-out.txt
+
+# Local IDE/editor state
+.vscode/
+.idea/

@@ -1,0 +1,154 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+  }
+
+  html,
+  body {
+    height: 100%;
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    overflow: hidden;
+  }
+
+  #root {
+    height: 100%;
+  }
+
+  /* Custom scrollbar */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: #cbd5e1;
+    border-radius: 3px;
+  }
+
+  .dark ::-webkit-scrollbar-thumb {
+    background: #334155;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: #94a3b8;
+  }
+
+  .dark ::-webkit-scrollbar-thumb:hover {
+    background: #475569;
+  }
+}
+
+@layer components {
+  .drag-region {
+    -webkit-app-region: drag;
+  }
+
+  .no-drag {
+    -webkit-app-region: no-drag;
+  }
+
+  .glass-panel {
+    @apply bg-white/70 border border-surface-200 rounded-lg backdrop-blur-sm
+           dark:bg-surface-800/50 dark:border-surface-700/50;
+  }
+
+  .btn-primary {
+    @apply px-4 py-2 bg-primary-600 hover:bg-primary-700 text-white rounded-lg 
+           transition-all duration-200 font-medium text-sm 
+           active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+
+  .btn-secondary {
+    @apply px-4 py-2 bg-surface-200 hover:bg-surface-300 text-surface-700 
+           rounded-lg transition-all duration-200 font-medium text-sm 
+           active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed
+           dark:bg-surface-700 dark:hover:bg-surface-600 dark:text-surface-200;
+  }
+
+  .btn-danger {
+    @apply px-4 py-2 bg-red-600/80 hover:bg-red-600 text-white rounded-lg 
+           transition-all duration-200 font-medium text-sm 
+           active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+
+  .btn-icon {
+    @apply p-2 rounded-lg transition-colors duration-150 
+           hover:bg-surface-200 text-surface-500 hover:text-surface-800
+           dark:hover:bg-surface-700 dark:text-surface-400 dark:hover:text-surface-200;
+  }
+
+  .input-field {
+    @apply w-full px-3 py-2 rounded-lg text-sm transition-all duration-200
+           bg-white border border-surface-300 text-surface-900 placeholder-surface-400
+           focus:outline-none focus:border-primary-500 focus:ring-1 focus:ring-primary-500/30
+           dark:bg-surface-800 dark:border-surface-600 dark:text-surface-100 dark:placeholder-surface-500;
+  }
+
+  .card {
+    @apply rounded-xl p-4 border
+           bg-white border-surface-200
+           dark:bg-surface-800 dark:border-surface-700;
+  }
+
+  .status-dot {
+    @apply w-2.5 h-2.5 rounded-full;
+  }
+
+  .status-connected {
+    @apply bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.5)];
+  }
+
+  .status-disconnected {
+    @apply bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.5)];
+  }
+
+  .status-connecting {
+    @apply bg-yellow-500 shadow-[0_0_8px_rgba(245,158,11,0.5)] animate-pulse;
+  }
+}
+
+/*
+ * Light-mode readability overrides.
+ *
+ * The UI was originally authored for dark mode using light-gray text utilities
+ * (text-surface-100..500) on dark surfaces. Rather than rewrite every element,
+ * we remap those specific text utilities to dark-gray equivalents when the app
+ * is NOT in dark mode, so text stays readable on the light backgrounds. Dark
+ * mode (html.dark) keeps Tailwind's original values untouched.
+ */
+@layer utilities {
+  html:not(.dark) .text-surface-100 { color: #1e293b; }
+  html:not(.dark) .text-surface-200 { color: #1e293b; }
+  html:not(.dark) .text-surface-300 { color: #334155; }
+  html:not(.dark) .text-surface-400 { color: #475569; }
+  html:not(.dark) .text-surface-500 { color: #64748b; }
+  html:not(.dark) .text-surface-600 { color: #94a3b8; }
+
+  /* Surface backgrounds authored for dark mode → light equivalents. */
+  html:not(.dark) .bg-surface-900 { background-color: #f8fafc; }
+  html:not(.dark) .bg-surface-950 { background-color: #f1f5f9; }
+  html:not(.dark) .bg-surface-800 { background-color: #ffffff; }
+
+  /* Dark-mode translucent fills used for list rows / inputs → subtle light. */
+  html:not(.dark) .bg-surface-800\/50 { background-color: rgba(241, 245, 249, 0.7); }
+  html:not(.dark) .bg-surface-800\/50:hover { background-color: rgba(226, 232, 240, 0.9); }
+  html:not(.dark) .bg-surface-900\/50 { background-color: rgba(241, 245, 249, 0.6); }
+
+  /* Borders authored dark → light. */
+  html:not(.dark) .border-surface-700 { border-color: #e2e8f0; }
+  html:not(.dark) .border-surface-800 { border-color: #e2e8f0; }
+  html:not(.dark) .border-surface-700\/30 { border-color: rgba(226, 232, 240, 0.7); }
+  html:not(.dark) .border-surface-700\/50 { border-color: rgba(226, 232, 240, 0.8); }
+}

@@ -5,6 +5,7 @@ import { exec, execFile, spawn, ChildProcess } from 'child_process';
 import http from 'http';
 import https from 'https';
 import net from 'net';
+import os from 'os';
 // Shared single-source-of-truth config generator (CommonJS module).
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { generateSingboxConfig } = require('../shared/config-generator.cjs');
@@ -616,23 +617,61 @@ function isUrlSafe(url: string): boolean {
 
 // ==================== Network Utilities ====================
 
-function fetchUrl(url: string, timeout = 10000): Promise<string> {
+/**
+ * User-Agent sent when fetching subscriptions.
+ *
+ * This is REQUIRED, not cosmetic: Node's http/https client sends no
+ * User-Agent by default, and many subscription providers sit behind a WAF that
+ * returns "403 Forbidden" for UA-less requests. That produced the confusing
+ * "no nodes found" symptom — the app was successfully downloading an HTML
+ * error page and then failing to find proxies in it.
+ *
+ * The string deliberately identifies as clash/mihomo-compatible because many
+ * panels switch response FORMAT based on the UA. We can parse Clash/Mihomo
+ * YAML and plain link lists, but NOT sing-box's own JSON config format, so we
+ * must not advertise "sing-box" or some providers would hand back a config
+ * this app can't read.
+ */
+const SUBSCRIPTION_USER_AGENT = 'AwesomeProxy/1.0.0 (compatible; clash; mihomo)';
+
+function fetchUrl(url: string, timeout = 10000, redirects = 0): Promise<string> {
   // Validate URL to prevent SSRF attacks
   if (!isUrlSafe(url)) {
     return Promise.reject(new Error('Blocked: potentially unsafe URL (internal/private network)'));
   }
+  if (redirects > 6) {
+    return Promise.reject(new Error('Too many redirects'));
+  }
 
   return new Promise((resolve, reject) => {
     const mod = url.startsWith('https') ? https : http;
-    const req = mod.get(url, { timeout }, (res) => {
-      if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        fetchUrl(res.headers.location, timeout).then(resolve).catch(reject);
-        return;
+    const req = mod.get(
+      url,
+      {
+        timeout,
+        headers: {
+          'User-Agent': SUBSCRIPTION_USER_AGENT,
+          Accept: '*/*',
+        },
+      },
+      (res) => {
+        if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          res.resume();
+          fetchUrl(res.headers.location, timeout, redirects + 1).then(resolve).catch(reject);
+          return;
+        }
+        // Surface HTTP errors instead of handing an error page to the parser,
+        // which previously showed up as a misleading "no valid proxy nodes".
+        if (res.statusCode && (res.statusCode < 200 || res.statusCode >= 300)) {
+          res.resume();
+          reject(new Error(`HTTP ${res.statusCode} from subscription server`));
+          return;
+        }
+        let data = '';
+        res.on('data', (chunk) => (data += chunk));
+        res.on('end', () => resolve(data));
       }
-      let data = '';
-      res.on('data', (chunk) => (data += chunk));
-      res.on('end', () => resolve(data));
-    });
+    );
     req.on('error', reject);
     req.on('timeout', () => {
       req.destroy();
@@ -1263,6 +1302,22 @@ function registerIpcHandlers() {
 
   ipcMain.handle('network:test-latency', async (_event, host: string, port: number) => {
     return await testLatency(host, port);
+  });
+
+  // This machine's LAN IPv4 addresses, so the Settings page can tell the user
+  // exactly what to point other devices at when LAN sharing is enabled.
+  ipcMain.handle('network:get-lan-addresses', () => {
+    const out: string[] = [];
+    const ifaces = os.networkInterfaces();
+    for (const name of Object.keys(ifaces)) {
+      for (const iface of ifaces[name] || []) {
+        // Skip loopback, IPv6, and our own TUN adapter (172.19.0.x).
+        if (iface.family !== 'IPv4' || iface.internal) continue;
+        if (iface.address.startsWith('172.19.0.')) continue;
+        out.push(iface.address);
+      }
+    }
+    return out;
   });
 }
 

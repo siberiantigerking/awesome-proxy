@@ -11,6 +11,7 @@ export default function SubscriptionManager() {
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [updatingId, setUpdatingId] = useState<string | null>(null);
   const [updatingAll, setUpdatingAll] = useState(false);
+  const [updateError, setUpdateError] = useState<string | null>(null);
 
   // Remove a subscription and all proxy nodes that were imported from it.
   const handleRemoveSubscription = (sub: Subscription) => {
@@ -27,8 +28,15 @@ export default function SubscriptionManager() {
 
   const handleUpdateOne = async (sub: Subscription) => {
     setUpdatingId(sub.id);
+    setUpdateError(null);
     try {
       const result = await fetchSubscription(sub);
+      // Surface failures instead of silently doing nothing. Previously a failed
+      // fetch (e.g. HTTP 403 from the provider's WAF) left the UI unchanged
+      // with no explanation, which looked like "the import just doesn't work".
+      if (result.error) {
+        setUpdateError(`${sub.name}: ${result.error}`);
+      }
       if (result.nodes.length > 0) {
         // Remove old nodes from this subscription and add new ones
         const otherNodes = nodes.filter((n) => n.subscriptionId !== sub.id);
@@ -38,8 +46,9 @@ export default function SubscriptionManager() {
           nodeCount: result.nodes.length,
         });
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to update subscription:', err);
+      setUpdateError(`${sub.name}: ${err?.message || 'Failed to update subscription.'}`);
     } finally {
       setUpdatingId(null);
     }
@@ -94,6 +103,19 @@ export default function SubscriptionManager() {
       <p className="text-xs text-surface-500">
         Manage subscription URLs to automatically import proxy nodes. Supports base64 and Clash YAML formats.
       </p>
+
+      {updateError && (
+        <div className="rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 flex items-start justify-between gap-3">
+          <p className="text-sm text-red-300 break-words">{updateError}</p>
+          <button
+            onClick={() => setUpdateError(null)}
+            className="text-red-400 hover:text-red-200 text-xs shrink-0"
+            aria-label="Dismiss error"
+          >
+            ✕
+          </button>
+        </div>
+      )}
 
       {/* Subscription List */}
       <div className="space-y-3">

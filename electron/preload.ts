@@ -96,5 +96,6 @@ contextBridge.exposeInMainWorld('api', {
       ipcRenderer.invoke('network:fetch-url', url, timeout),
     testLatency: (host: string, port: number) =>
       ipcRenderer.invoke('network:test-latency', host, port),
+    getLanAddresses: () => ipcRenderer.invoke('network:get-lan-addresses'),
   },
 });

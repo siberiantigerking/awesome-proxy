@@ -166,6 +166,51 @@ export default function Settings() {
         </div>
       </section>
 
+      {/* LAN sharing */}
+      <section className="card space-y-3">
+        <div className="flex items-center gap-2">
+          <Server size={16} className="text-primary-400" />
+          <h3 className="text-sm font-medium text-surface-200">Local Network Sharing</h3>
+        </div>
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <p className="text-sm text-surface-700 dark:text-surface-300">
+              Allow devices on your LAN to use this proxy
+            </p>
+            <p className="text-[11px] text-surface-400 dark:text-surface-500">
+              Binds the mixed port to 0.0.0.0 instead of 127.0.0.1.
+            </p>
+          </div>
+          <input
+            type="checkbox"
+            checked={!!settings.allowLan}
+            onChange={(e) => updateSettings({ allowLan: e.target.checked })}
+            className="w-4 h-4 rounded shrink-0"
+          />
+        </div>
+
+        {settings.allowLan && (
+          <>
+            <div className="rounded-lg border border-yellow-500/40 bg-yellow-500/10 px-3 py-2">
+              <p className="text-[11px] text-yellow-300">
+                <span className="font-medium">Security warning:</span> this proxy has no
+                authentication. Anyone who can reach {`port ${settings.mixedPort}`} on this machine
+                can route traffic through it. Only enable on networks you trust, and expect
+                Windows Firewall to ask for permission the first time.
+              </p>
+            </div>
+            <LanAddressHint port={settings.mixedPort} />
+          </>
+        )}
+
+        {settings.proxyMode !== 'system' && settings.proxyMode !== 'manual' && settings.allowLan && (
+          <p className="text-[11px] text-surface-500">
+            Note: other devices must point their own proxy settings at this machine. TUN/Split only
+            capture traffic from <em>this</em> computer.
+          </p>
+        )}
+      </section>
+
       {/* DNS */}
       <section className="card space-y-3">
         <div className="flex items-center gap-2">
@@ -457,6 +502,59 @@ function CoreUpdater() {
       )}
 
       <p className="text-[10px] text-surface-400 dark:text-surface-600">Installed: v{singboxVersion}</p>
+    </div>
+  );
+}
+
+// ==================== LAN Address Hint ====================
+
+/**
+ * Show this machine's LAN IPv4 addresses so the user knows what to point other
+ * devices at. Uses WebRTC-free discovery via the main process where possible.
+ */
+function LanAddressHint({ port }: { port: number }) {
+  const [addresses, setAddresses] = React.useState<string[] | null>(null);
+
+  React.useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        if (window.api?.network?.getLanAddresses) {
+          const addrs = await window.api.network.getLanAddresses();
+          if (active) setAddresses(addrs);
+        } else {
+          if (active) setAddresses([]);
+        }
+      } catch {
+        if (active) setAddresses([]);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  if (addresses === null) {
+    return <p className="text-[11px] text-surface-500">Detecting local addresses…</p>;
+  }
+  if (addresses.length === 0) {
+    return (
+      <p className="text-[11px] text-surface-500">
+        Point other devices at this computer's LAN IP on port {port}.
+      </p>
+    );
+  }
+
+  return (
+    <div className="space-y-1">
+      <p className="text-[11px] text-surface-400">
+        Configure other devices to use an HTTP/SOCKS proxy at:
+      </p>
+      {addresses.map((ip) => (
+        <p key={ip} className="text-xs font-mono text-primary-500 dark:text-primary-300">
+          {ip}:{port}
+        </p>
+      ))}
     </div>
   );
 }

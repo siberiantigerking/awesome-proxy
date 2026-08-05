@@ -141,6 +141,76 @@ function clashProxyToNode(proxy: any): ProxyNode | null {
     }
   }
 
+  if (type === 'hysteria2') {
+    // Clash/Mihomo: `obfs: salamander` + `obfs-password`.
+    const obfs = String(proxy.obfs || '').toLowerCase();
+    if (obfs === 'salamander') {
+      node.obfsType = 'salamander';
+      const op = proxy['obfs-password'] || proxy['obfs_password'];
+      if (op) node.obfsPassword = String(op);
+    }
+    // Port hopping: Mihomo uses `ports` ("1000-2000,3000-4000").
+    const rawPorts = proxy.ports || proxy['server-ports'];
+    if (rawPorts) {
+      const list = String(rawPorts)
+        .split(',')
+        .map((r: string) => r.trim().replace('-', ':'))
+        .filter(Boolean);
+      if (list.length) node.serverPorts = list;
+    }
+    const hi = proxy['hop-interval'] || proxy['hop_interval'];
+    if (hi) node.hopInterval = typeof hi === 'number' ? `${hi}s` : String(hi);
+    const up = parseInt(proxy.up || proxy['up-mbps']);
+    const down = parseInt(proxy.down || proxy['down-mbps']);
+    if (up > 0) node.upMbps = up;
+    if (down > 0) node.downMbps = down;
+  }
+
+  if (type === 'tuic') {
+    // TUIC is QUIC-based: always TLS.
+    node.tls = true;
+    const cc = proxy['congestion-controller'] || proxy['congestion-control'];
+    if (cc === 'cubic' || cc === 'new_reno' || cc === 'bbr') node.congestionControl = cc;
+    const urm = proxy['udp-relay-mode'];
+    if (urm === 'native' || urm === 'quic') node.udpRelayMode = urm;
+  }
+
+  if (type === 'anytls') {
+    // AnyTLS always runs over TLS.
+    node.tls = true;
+  }
+
+  if (type === 'shadowtls') {
+    // Clash-style ShadowTLS: the outer handshake settings live alongside the
+    // inner Shadowsocks credentials (`password`/`cipher`, already read above).
+    node.tls = true;
+    const v = parseInt(proxy.version);
+    if (v === 1 || v === 2 || v === 3) node.shadowTlsVersion = v;
+    // Clash puts the ShadowTLS secret in `password` when the inner SS secret
+    // is under a different key; prefer an explicit shadowtls-specific field.
+    const stPw = proxy['shadowtls-password'] || proxy['sts-password'];
+    if (stPw) node.shadowTlsPassword = String(stPw);
+  }
+
+  if (type === 'wireguard') {
+    // Clash/Mihomo WireGuard fields.
+    const pk = proxy['private-key'] || proxy.privateKey;
+    if (pk) node.privateKey = String(pk);
+    const pub = proxy['public-key'] || proxy.publicKey;
+    if (pub) node.peerPublicKey = String(pub);
+    const psk = proxy['pre-shared-key'] || proxy['preshared-key'];
+    if (psk) node.preSharedKey = String(psk);
+    const addrs: string[] = [];
+    if (proxy.ip) addrs.push(String(proxy.ip).includes('/') ? String(proxy.ip) : `${proxy.ip}/32`);
+    if (proxy.ipv6) addrs.push(String(proxy.ipv6).includes('/') ? String(proxy.ipv6) : `${proxy.ipv6}/128`);
+    if (addrs.length) node.localAddress = addrs;
+    const mtu = parseInt(proxy.mtu);
+    if (mtu) node.mtu = mtu;
+    if (Array.isArray(proxy.reserved) && proxy.reserved.length === 3) {
+      node.reserved = proxy.reserved.map((n: any) => parseInt(n) || 0);
+    }
+  }
+
   node.country = extractCountryFromName(node.name);
   return node;
 }
@@ -157,6 +227,8 @@ function normalizeType(type: string): ProxyNode['type'] | null {
     wireguard: 'wireguard',
     wg: 'wireguard',
     tuic: 'tuic',
+    anytls: 'anytls',
+    shadowtls: 'shadowtls',
   };
   return map[type] || null;
 }

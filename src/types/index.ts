@@ -1,6 +1,15 @@
 // ==================== Proxy Node Types ====================
 
-export type ProxyProtocol = 'vmess' | 'vless' | 'trojan' | 'shadowsocks' | 'hysteria2' | 'wireguard' | 'tuic';
+export type ProxyProtocol =
+  | 'vmess'
+  | 'vless'
+  | 'trojan'
+  | 'shadowsocks'
+  | 'hysteria2'
+  | 'wireguard'
+  | 'tuic'
+  | 'anytls'
+  | 'shadowtls';
 
 export interface ProxyNode {
   id: string;
@@ -35,6 +44,41 @@ export interface ProxyNode {
   transportType?: 'tcp' | 'ws' | 'grpc' | 'http' | 'quic';
   transportPath?: string;
   transportHost?: string;
+
+  // TUIC / Hysteria2 (QUIC)
+  congestionControl?: 'cubic' | 'new_reno' | 'bbr';
+  udpRelayMode?: 'native' | 'quic';
+
+  // Hysteria2 specifics.
+  // QUIC traffic obfuscation. sing-box 1.13 only supports "salamander"
+  // ("gecko" was added in 1.14). Without this, a server that REQUIRES obfs
+  // will silently refuse the connection.
+  obfsType?: 'salamander';
+  obfsPassword?: string;
+  // Port hopping: a list of port ranges like ["2080:3000"]. Overrides `port`.
+  serverPorts?: string[];
+  hopInterval?: string; // e.g. "30s"
+  // Max bandwidth in Mbps. If both are empty, sing-box uses BBR instead of
+  // Hysteria's own congestion control.
+  upMbps?: number;
+  downMbps?: number;
+
+  // ShadowTLS (wraps an inner Shadowsocks connection).
+  // `password`/`method` carry the inner Shadowsocks credentials, while these
+  // carry the ShadowTLS handshake settings.
+  shadowTlsVersion?: 1 | 2 | 3;
+  shadowTlsPassword?: string;
+
+  // WireGuard. Emitted as an `endpoints` entry (the WireGuard *outbound* was
+  // deprecated in sing-box 1.11 and removed in 1.13).
+  privateKey?: string;
+  localAddress?: string[];   // e.g. ["10.0.0.2/32", "fd00::2/128"]
+  peerPublicKey?: string;
+  preSharedKey?: string;
+  reserved?: number[];       // 3 bytes
+  mtu?: number;
+  persistentKeepalive?: number; // seconds
+
   
   // Metadata
   tag?: string;
@@ -69,6 +113,12 @@ export interface AppSettings {
   httpPort: number;
   mixedPort: number;
   proxyMode: ProxyMode;
+  /**
+   * Allow other devices on the local network to use this machine as a proxy.
+   * When on, the mixed inbound binds 0.0.0.0 instead of 127.0.0.1.
+   * Off by default — an open proxy on an untrusted network is a real risk.
+   */
+  allowLan?: boolean;
   remoteDns: string;
   directDns: string;
   bypassChina: boolean;
@@ -193,6 +243,7 @@ export interface ElectronAPI {
   network: {
     fetchUrl: (url: string, timeout?: number) => Promise<string>;
     testLatency: (host: string, port: number) => Promise<number>;
+    getLanAddresses?: () => Promise<string[]>;
   };
 }
 

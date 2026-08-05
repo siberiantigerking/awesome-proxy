@@ -4,6 +4,7 @@ import {
   Clipboard, MoreVertical, ChevronDown, ChevronUp, ExternalLink, QrCode
 } from '../components/Icons';
 import { useNodeStore } from '../store/nodeStore';
+import { useSubscriptionStore } from '../store/subscriptionStore';
 import { useSettingsStore } from '../store/settingsStore';
 import { parseProxyLink, parseProxyLinks, getCountryFlag, getProtocolColor } from '../services/node-parser';
 import type { ProxyNode, ProxyProtocol } from '../types';
@@ -19,18 +20,69 @@ export default function NodeManager() {
   const [testingAll, setTestingAll] = useState(false);
   const [testingIds, setTestingIds] = useState<Set<string>>(new Set());
   const [testProgress, setTestProgress] = useState({ done: 0, total: 0 });
+  // Group filter: 'all', 'manual' (nodes not from any subscription), or a
+  // subscription id. Nodes are grouped by which subscription imported them.
+  const [activeGroup, setActiveGroup] = useState<string>('all');
 
-  // Filter nodes by search
+  const subscriptions = useSubscriptionStore((s) => s.subscriptions);
+
+  // Build the group list with live counts. "Manual" only appears when there
+  // are hand-added nodes, and a subscription only appears once it has nodes,
+  // so the bar stays quiet for simple setups.
+  const groups = useMemo(() => {
+    const counts = new Map<string, number>();
+    let manual = 0;
+    for (const n of nodes) {
+      if (n.subscriptionId) counts.set(n.subscriptionId, (counts.get(n.subscriptionId) || 0) + 1);
+      else manual++;
+    }
+    const list: { id: string; label: string; count: number }[] = [
+      { id: 'all', label: 'All', count: nodes.length },
+    ];
+    for (const sub of subscriptions) {
+      const c = counts.get(sub.id) || 0;
+      if (c > 0) list.push({ id: sub.id, label: sub.name, count: c });
+    }
+    // Nodes whose subscription was deleted but that somehow survived.
+    const orphaned = nodes.filter(
+      (n) => n.subscriptionId && !subscriptions.some((s) => s.id === n.subscriptionId)
+    ).length;
+    if (orphaned > 0) list.push({ id: '__orphaned', label: 'Other', count: orphaned });
+    if (manual > 0) list.push({ id: 'manual', label: 'Manual', count: manual });
+    return list;
+  }, [nodes, subscriptions]);
+
+  // Filter nodes by group, then by search text.
   const filteredNodes = useMemo(() => {
-    if (!searchQuery) return nodes;
+    let list = nodes;
+
+    if (activeGroup === 'manual') {
+      list = list.filter((n) => !n.subscriptionId);
+    } else if (activeGroup === '__orphaned') {
+      list = list.filter(
+        (n) => n.subscriptionId && !subscriptions.some((s) => s.id === n.subscriptionId)
+      );
+    } else if (activeGroup !== 'all') {
+      list = list.filter((n) => n.subscriptionId === activeGroup);
+    }
+
+    if (!searchQuery) return list;
     const q = searchQuery.toLowerCase();
-    return nodes.filter(
+    return list.filter(
       (n) =>
         n.name.toLowerCase().includes(q) ||
         n.server.toLowerCase().includes(q) ||
         n.type.toLowerCase().includes(q)
     );
-  }, [nodes, searchQuery]);
+  }, [nodes, searchQuery, activeGroup, subscriptions]);
+
+  // If the active group disappears (subscription deleted / all its nodes gone),
+  // fall back to "All" so the list never looks mysteriously empty.
+  React.useEffect(() => {
+    if (activeGroup !== 'all' && !groups.some((g) => g.id === activeGroup)) {
+      setActiveGroup('all');
+    }
+  }, [groups, activeGroup]);
 
   const markTesting = (id: string, testing: boolean) => {
     setTestingIds((prev) => {
@@ -198,9 +250,32 @@ export default function NodeManager() {
         )}
       </div>
 
+      {/* Subscription groups. Only shown when there's more than one group to
+          choose from, so a single-subscription setup stays uncluttered. */}
+      {groups.length > 2 && (
+        <div className="flex items-center gap-1.5 flex-wrap">
+          {groups.map((g) => (
+            <button
+              key={g.id}
+              onClick={() => setActiveGroup(g.id)}
+              className={`px-2.5 py-1 rounded-full text-xs border transition-colors ${
+                activeGroup === g.id
+                  ? 'bg-primary-600/20 border-primary-500/40 text-primary-600 dark:text-primary-300'
+                  : 'bg-surface-100 border-surface-200 text-surface-600 hover:bg-surface-200 dark:bg-surface-800/50 dark:border-surface-700/40 dark:text-surface-400 dark:hover:bg-surface-800'
+              }`}
+              title={g.id === 'manual' ? 'Nodes added manually (not from a subscription)' : g.label}
+            >
+              <span className="truncate max-w-[160px] inline-block align-bottom">{g.label}</span>
+              <span className="ml-1.5 opacity-60">{g.count}</span>
+            </button>
+          ))}
+        </div>
+      )}
+
       {/* Node Count */}
       <div className="text-xs text-surface-500">
         {filteredNodes.length} of {nodes.length} nodes
+        {activeGroup !== 'all' && ' (filtered by group)'}
       </div>
 
       {/* Node List */}
@@ -424,7 +499,7 @@ function ImportDialog({ onClose, onImport }: { onClose: () => void; onImport: (n
         <div className="p-4 border-b border-surface-700">
           <h3 className="text-base font-semibold">Import Proxy Nodes</h3>
           <p className="text-xs text-surface-500 mt-1">
-            Paste links (vmess://, vless://, trojan://, ss://, hysteria2://), a base64 subscription, or scan a QR code
+            Paste links (vmess://, vless://, trojan://, ss://, hysteria2://, tuic://, anytls://), a base64 subscription, or scan a QR code
           </p>
         </div>
 
@@ -532,6 +607,10 @@ function NodeFormDialog({
     { value: 'trojan', label: 'Trojan' },
     { value: 'shadowsocks', label: 'Shadowsocks' },
     { value: 'hysteria2', label: 'Hysteria2' },
+    { value: 'tuic', label: 'TUIC' },
+    { value: 'anytls', label: 'AnyTLS' },
+    { value: 'shadowtls', label: 'ShadowTLS (+ Shadowsocks)' },
+    { value: 'wireguard', label: 'WireGuard' },
   ];
 
   // Per-protocol required-field validation so users get a clear reason a node
@@ -541,14 +620,28 @@ function NodeFormDialog({
     if (!form.name?.trim()) return 'Name is required.';
     if (!form.server?.trim()) return 'Server address is required.';
     if (!form.port || form.port < 1 || form.port > 65535) return 'Port must be between 1 and 65535.';
-    if ((form.type === 'vmess' || form.type === 'vless') && !form.uuid?.trim()) {
+    if ((form.type === 'vmess' || form.type === 'vless' || form.type === 'tuic') && !form.uuid?.trim()) {
       return 'UUID is required for this protocol.';
     }
-    if ((form.type === 'trojan' || form.type === 'hysteria2' || form.type === 'shadowsocks') && !form.password?.trim()) {
-      return 'Password is required for this protocol.';
+    if (
+      (form.type === 'trojan' ||
+        form.type === 'hysteria2' ||
+        form.type === 'shadowsocks' ||
+        form.type === 'anytls' ||
+        form.type === 'shadowtls') &&
+      !form.password?.trim()
+    ) {
+      return form.type === 'shadowtls'
+        ? 'Password is required (the inner Shadowsocks password).'
+        : 'Password is required for this protocol.';
     }
     if (form.type === 'vless' && form.realityPublicKey && !form.sni?.trim()) {
       return 'Reality requires an SNI (server name).';
+    }
+    if (form.type === 'wireguard') {
+      if (!form.privateKey?.trim()) return 'WireGuard requires a private key.';
+      if (!form.peerPublicKey?.trim()) return 'WireGuard requires the peer public key.';
+      if (!form.localAddress?.length) return 'WireGuard requires a local address (e.g. 10.0.0.2/32).';
     }
     return null;
   })();
@@ -612,7 +705,7 @@ function NodeFormDialog({
           </div>
 
           {/* UUID / Password */}
-          {(form.type === 'vmess' || form.type === 'vless') && (
+          {(form.type === 'vmess' || form.type === 'vless' || form.type === 'tuic') && (
             <div>
               <label className="text-xs text-surface-400 mb-1 block">UUID</label>
               <input
@@ -625,7 +718,10 @@ function NodeFormDialog({
             </div>
           )}
 
-          {(form.type === 'trojan' || form.type === 'hysteria2') && (
+          {(form.type === 'trojan' ||
+            form.type === 'hysteria2' ||
+            form.type === 'tuic' ||
+            form.type === 'anytls') && (
             <div>
               <label className="text-xs text-surface-400 mb-1 block">Password</label>
               <input
@@ -638,7 +734,226 @@ function NodeFormDialog({
             </div>
           )}
 
-          {form.type === 'shadowsocks' && (
+          {/* Hysteria2 specific: obfuscation, port hopping, bandwidth */}
+          {form.type === 'hysteria2' && (
+            <>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs text-surface-400 mb-1 block">Obfuscation</label>
+                  <select
+                    value={form.obfsType || ''}
+                    onChange={(e) => update('obfsType', e.target.value || undefined)}
+                    className="input-field"
+                  >
+                    <option value="">none</option>
+                    <option value="salamander">salamander</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs text-surface-400 mb-1 block">Obfs Password</label>
+                  <input
+                    type="text"
+                    value={form.obfsPassword || ''}
+                    onChange={(e) => update('obfsPassword', e.target.value)}
+                    placeholder={form.obfsType ? 'obfs password' : 'select obfuscation first'}
+                    disabled={!form.obfsType}
+                    className="input-field disabled:opacity-50"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="text-xs text-surface-400 mb-1 block">
+                  Port Hopping Range (overrides Port)
+                </label>
+                <input
+                  type="text"
+                  value={(form.serverPorts || []).join(',')}
+                  onChange={(e) =>
+                    update(
+                      'serverPorts',
+                      e.target.value
+                        .split(',')
+                        .map((s) => s.trim().replace('-', ':'))
+                        .filter(Boolean)
+                    )
+                  }
+                  placeholder="1000:2000,3000:4000"
+                  className="input-field font-mono text-xs"
+                />
+              </div>
+              <div className="grid grid-cols-3 gap-3">
+                <div>
+                  <label className="text-xs text-surface-400 mb-1 block">Hop Interval</label>
+                  <input
+                    type="text"
+                    value={form.hopInterval || ''}
+                    onChange={(e) => update('hopInterval', e.target.value || undefined)}
+                    placeholder="30s"
+                    className="input-field"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-surface-400 mb-1 block">Up (Mbps)</label>
+                  <input
+                    type="number"
+                    value={form.upMbps ?? ''}
+                    onChange={(e) => update('upMbps', parseInt(e.target.value) || undefined)}
+                    placeholder="auto"
+                    className="input-field"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-surface-400 mb-1 block">Down (Mbps)</label>
+                  <input
+                    type="number"
+                    value={form.downMbps ?? ''}
+                    onChange={(e) => update('downMbps', parseInt(e.target.value) || undefined)}
+                    placeholder="auto"
+                    className="input-field"
+                  />
+                </div>
+              </div>
+              <p className="text-[11px] text-surface-500">
+                Leave bandwidth empty to use BBR congestion control. Obfuscation must match the
+                server, or the connection will be silently refused.
+              </p>
+            </>
+          )}
+
+          {/* TUIC specific (QUIC tuning) */}
+          {form.type === 'tuic' && (
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="text-xs text-surface-400 mb-1 block">Congestion Control</label>
+                <select
+                  value={form.congestionControl || ''}
+                  onChange={(e) => update('congestionControl', e.target.value || undefined)}
+                  className="input-field"
+                >
+                  <option value="">default (cubic)</option>
+                  <option value="cubic">cubic</option>
+                  <option value="new_reno">new_reno</option>
+                  <option value="bbr">bbr</option>
+                </select>
+              </div>
+              <div>
+                <label className="text-xs text-surface-400 mb-1 block">UDP Relay Mode</label>
+                <select
+                  value={form.udpRelayMode || ''}
+                  onChange={(e) => update('udpRelayMode', e.target.value || undefined)}
+                  className="input-field"
+                >
+                  <option value="">default (native)</option>
+                  <option value="native">native</option>
+                  <option value="quic">quic</option>
+                </select>
+              </div>
+            </div>
+          )}
+
+          {/* ShadowTLS: outer handshake settings + inner Shadowsocks credentials */}
+          {form.type === 'shadowtls' && (
+            <>
+              <p className="text-[11px] text-surface-500">
+                ShadowTLS wraps a Shadowsocks connection. Set the ShadowTLS handshake below and
+                the inner Shadowsocks method/password underneath.
+              </p>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs text-surface-400 mb-1 block">ShadowTLS Version</label>
+                  <select
+                    value={form.shadowTlsVersion || 3}
+                    onChange={(e) => update('shadowTlsVersion', parseInt(e.target.value))}
+                    className="input-field"
+                  >
+                    <option value={1}>v1 (no password)</option>
+                    <option value={2}>v2</option>
+                    <option value={3}>v3</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs text-surface-400 mb-1 block">ShadowTLS Password</label>
+                  <input
+                    type="text"
+                    value={form.shadowTlsPassword || ''}
+                    onChange={(e) => update('shadowTlsPassword', e.target.value)}
+                    placeholder={form.shadowTlsVersion === 1 ? 'not used in v1' : 'shadowtls password'}
+                    disabled={form.shadowTlsVersion === 1}
+                    className="input-field disabled:opacity-50"
+                  />
+                </div>
+              </div>
+            </>
+          )}
+
+          {/* WireGuard specific */}
+          {form.type === 'wireguard' && (
+            <>
+              <div>
+                <label className="text-xs text-surface-400 mb-1 block">Private Key</label>
+                <input
+                  type="text"
+                  value={form.privateKey || ''}
+                  onChange={(e) => update('privateKey', e.target.value)}
+                  placeholder="base64 private key"
+                  className="input-field font-mono text-xs"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-surface-400 mb-1 block">Peer Public Key</label>
+                <input
+                  type="text"
+                  value={form.peerPublicKey || ''}
+                  onChange={(e) => update('peerPublicKey', e.target.value)}
+                  placeholder="base64 public key"
+                  className="input-field font-mono text-xs"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-surface-400 mb-1 block">
+                  Local Address (comma-separated)
+                </label>
+                <input
+                  type="text"
+                  value={(form.localAddress || []).join(', ')}
+                  onChange={(e) =>
+                    update(
+                      'localAddress',
+                      e.target.value
+                        .split(',')
+                        .map((s) => s.trim())
+                        .filter(Boolean)
+                    )
+                  }
+                  placeholder="10.0.0.2/32, fd00::2/128"
+                  className="input-field font-mono text-xs"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs text-surface-400 mb-1 block">Pre-shared Key (optional)</label>
+                  <input
+                    type="text"
+                    value={form.preSharedKey || ''}
+                    onChange={(e) => update('preSharedKey', e.target.value)}
+                    placeholder="optional"
+                    className="input-field font-mono text-xs"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-surface-400 mb-1 block">MTU</label>
+                  <input
+                    type="number"
+                    value={form.mtu ?? 1408}
+                    onChange={(e) => update('mtu', parseInt(e.target.value) || undefined)}
+                    className="input-field"
+                  />
+                </div>
+              </div>
+            </>
+          )}
+
+          {(form.type === 'shadowsocks' || form.type === 'shadowtls') && (
             <>
               <div>
                 <label className="text-xs text-surface-400 mb-1 block">Encryption Method</label>

@@ -26,6 +26,7 @@ const defaultSettings: AppSettings = {
   httpPort: 8080,
   mixedPort: 7890,
   proxyMode: 'system',
+  allowLan: false,
   remoteDns: 'https://dns.google/dns-query',
   directDns: 'https://dns.alidns.com/dns-query',
   bypassChina: true,

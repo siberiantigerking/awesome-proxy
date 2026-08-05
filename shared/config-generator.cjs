@@ -195,6 +195,92 @@ function buildRequiredTls(node) {
 }
 
 /**
+ * True for protocols that must be emitted as a top-level `endpoints` entry
+ * rather than an `outbounds` entry.
+ *
+ * WireGuard is the only one currently: the WireGuard *outbound* was deprecated
+ * in sing-box 1.11.0 and REMOVED in 1.13.0, replaced by an endpoint. Endpoint
+ * tags are still referenced from selectors/route rules exactly like outbound
+ * tags, so nothing else in the config has to know the difference.
+ */
+function isEndpointProtocol(type) {
+  return type === 'wireguard';
+}
+
+/**
+ * Convert a WireGuard ProxyNode into a sing-box `endpoints` entry.
+ */
+function nodeToEndpoint(node, tag) {
+  const endpoint = {
+    type: 'wireguard',
+    tag,
+    address: Array.isArray(node.localAddress) && node.localAddress.length
+      ? node.localAddress
+      : ['10.0.0.2/32'],
+    private_key: node.privateKey || '',
+    peers: [
+      {
+        address: node.server,
+        port: node.port,
+        public_key: node.peerPublicKey || '',
+        // Route everything through the peer unless told otherwise.
+        allowed_ips: ['0.0.0.0/0', '::/0'],
+      },
+    ],
+  };
+  if (node.preSharedKey) endpoint.peers[0].pre_shared_key = node.preSharedKey;
+  if (Array.isArray(node.reserved) && node.reserved.length === 3) {
+    endpoint.peers[0].reserved = node.reserved;
+  }
+  if (node.persistentKeepalive) {
+    endpoint.peers[0].persistent_keepalive_interval = node.persistentKeepalive;
+  }
+  if (node.mtu) endpoint.mtu = node.mtu;
+  return endpoint;
+}
+
+/**
+ * Convert a single ProxyNode into one or more sing-box outbound objects.
+ *
+ * Returns an ARRAY because some protocols need a helper outbound alongside the
+ * primary one (ShadowTLS). The FIRST element is always the primary outbound and
+ * its tag equals `tag` — that's what selectors/route rules reference. Any extra
+ * elements are internal helpers with derived tags.
+ */
+function nodeToOutbounds(node, tag) {
+  // ShadowTLS is a TLS-camouflage *wrapper*, not a standalone proxy: the real
+  // payload is a Shadowsocks connection tunnelled through it. So we emit the
+  // shadowtls outbound as a helper and point a shadowsocks outbound at it via
+  // `detour`, keeping `tag` on the shadowsocks one so it stays the thing the
+  // rest of the config selects.
+  if (node.type === 'shadowtls') {
+    const helperTag = `${tag}-shadowtls`;
+    const helper = {
+      type: 'shadowtls',
+      tag: helperTag,
+      server: node.server,
+      server_port: node.port,
+      version: node.shadowTlsVersion || 3,
+      tls: buildRequiredTls(node),
+    };
+    // v1 has no password; v2/v3 require one.
+    if ((node.shadowTlsVersion || 3) !== 1 && node.shadowTlsPassword) {
+      helper.password = node.shadowTlsPassword;
+    }
+    const primary = {
+      type: 'shadowsocks',
+      tag,
+      method: node.method || '2022-blake3-aes-128-gcm',
+      password: node.password,
+      detour: helperTag,
+    };
+    return [primary, helper];
+  }
+
+  return [nodeToOutbound(node, tag)];
+}
+
+/**
  * Convert a single ProxyNode into a sing-box outbound object.
  */
 function nodeToOutbound(node, tag) {
@@ -256,15 +342,63 @@ function nodeToOutbound(node, tag) {
         password: node.password,
       };
 
-    case 'hysteria2':
-      return {
+    case 'hysteria2': {
+      const outbound = {
         type: 'hysteria2',
+        tag,
+        server: node.server,
+        password: node.password,
+        tls: buildRequiredTls(node),
+      };
+      // Port hopping: `server_ports` CONFLICTS with `server_port`, so emit
+      // exactly one of them. sing-box ignores server_port when server_ports is
+      // set, but emitting both is rejected as a conflict.
+      if (Array.isArray(node.serverPorts) && node.serverPorts.length) {
+        outbound.server_ports = node.serverPorts;
+        if (node.hopInterval) outbound.hop_interval = node.hopInterval;
+      } else {
+        outbound.server_port = node.port;
+      }
+      // QUIC traffic obfuscation. Both type and password are needed for it to
+      // do anything; a server configured with obfs will reject clients without.
+      if (node.obfsType && node.obfsPassword) {
+        outbound.obfs = { type: node.obfsType, password: node.obfsPassword };
+      }
+      // Bandwidth hints. Omit entirely to let sing-box fall back to BBR.
+      if (node.upMbps) outbound.up_mbps = node.upMbps;
+      if (node.downMbps) outbound.down_mbps = node.downMbps;
+      return outbound;
+    }
+
+    case 'tuic': {
+      // TLS is REQUIRED for TUIC (it's QUIC-based).
+      const outbound = {
+        type: 'tuic',
+        tag,
+        server: node.server,
+        server_port: node.port,
+        uuid: node.uuid,
+        tls: buildRequiredTls(node),
+      };
+      if (node.password) outbound.password = node.password;
+      if (node.congestionControl) outbound.congestion_control = node.congestionControl;
+      // `udp_relay_mode` conflicts with `udp_over_stream`; we only ever set the
+      // former, so it's safe to pass through.
+      if (node.udpRelayMode) outbound.udp_relay_mode = node.udpRelayMode;
+      return outbound;
+    }
+
+    case 'anytls': {
+      // TLS is REQUIRED for AnyTLS.
+      return {
+        type: 'anytls',
         tag,
         server: node.server,
         server_port: node.port,
         password: node.password,
         tls: buildRequiredTls(node),
       };
+    }
 
     default:
       // Best-effort passthrough for unknown/unsupported types.
@@ -290,12 +424,25 @@ function generateSingboxConfig(nodes, selectedIndex, settings) {
   const safeSettings = settings || {};
   const tags = buildOutboundTags(safeNodes);
 
-  // Materialize every node as a real outbound so the selector/urltest
-  // references always resolve (previously only the selected node was emitted,
-  // leaving the selector pointing at non-existent outbounds).
-  const nodeOutbounds = safeNodes.map((node, index) => nodeToOutbound(node, tags[index]));
+  // Materialize every node so the selector/urltest references always resolve
+  // (previously only the selected node was emitted, leaving the selector
+  // pointing at non-existent outbounds).
+  //
+  // Nodes split into two buckets by protocol: most become `outbounds`, but
+  // WireGuard must become a top-level `endpoints` entry (the WireGuard
+  // outbound was removed in sing-box 1.13). Endpoint tags are referenced from
+  // selectors exactly like outbound tags, so `tags` stays a single flat list.
+  const nodeOutbounds = [];
+  const nodeEndpoints = [];
+  safeNodes.forEach((node, index) => {
+    if (isEndpointProtocol(node && node.type)) {
+      nodeEndpoints.push(nodeToEndpoint(node, tags[index]));
+    } else {
+      nodeOutbounds.push(...nodeToOutbounds(node, tags[index]));
+    }
+  });
 
-  const hasNodes = nodeOutbounds.length > 0;
+  const hasNodes = safeNodes.length > 0;
   const defaultTag =
     selectedIndex >= 0 && selectedIndex < tags.length ? tags[selectedIndex] : (hasNodes ? tags[0] : 'direct');
 
@@ -426,11 +573,17 @@ function generateSingboxConfig(nodes, selectedIndex, settings) {
       ],
       final: 'remote-dns',
     },
+    // Only emitted when WireGuard nodes exist — an empty `endpoints` array is
+    // accepted but pointless noise in the generated config.
+    ...(nodeEndpoints.length ? { endpoints: nodeEndpoints } : {}),
     inbounds: [
       {
         type: 'mixed',
         tag: 'mixed-in',
-        listen: '127.0.0.1',
+        // Binding 0.0.0.0 exposes this proxy to the whole local network, so it
+        // is strictly opt-in. Note there is no inbound authentication here —
+        // anyone who can reach the port can use the proxy.
+        listen: safeSettings.allowLan ? '0.0.0.0' : '127.0.0.1',
         listen_port: safeSettings.mixedPort || 7890,
       },
     ],
@@ -502,6 +655,9 @@ function generateSingboxConfig(nodes, selectedIndex, settings) {
 module.exports = {
   generateSingboxConfig,
   nodeToOutbound,
+  nodeToOutbounds,
+  nodeToEndpoint,
+  isEndpointProtocol,
   buildTransport,
   buildOutboundTags,
 };

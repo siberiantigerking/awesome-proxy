@@ -2,7 +2,10 @@ import type { ProxyNode, ProxyProtocol } from '../types';
 
 /**
  * Parse proxy link strings into ProxyNode objects.
- * Supports: vmess://, vless://, trojan://, ss://, hysteria2://
+ * Supports: vmess://, vless://, trojan://, ss://, hysteria2://, tuic://, anytls://
+ *
+ * Note: WireGuard and ShadowTLS have no widely-agreed share-link format, so
+ * they're supported via manual entry / Clash YAML subscriptions instead.
  */
 export function parseProxyLink(link: string): ProxyNode | null {
   link = link.trim();
@@ -14,6 +17,8 @@ export function parseProxyLink(link: string): ProxyNode | null {
     if (link.startsWith('trojan://')) return parseTrojan(link);
     if (link.startsWith('ss://')) return parseShadowsocks(link);
     if (link.startsWith('hysteria2://') || link.startsWith('hy2://')) return parseHysteria2(link);
+    if (link.startsWith('tuic://')) return parseTuic(link);
+    if (link.startsWith('anytls://')) return parseAnytls(link);
     return null;
   } catch (err) {
     console.error('Failed to parse proxy link:', link, err);
@@ -36,7 +41,7 @@ export function parseProxyLinks(text: string): ProxyNode[] {
   const lines = decoded
     .split(/[\r\n]+/)
     .map((l) => l.trim())
-    .filter((l) => l && (l.startsWith('vmess://') || l.startsWith('vless://') || l.startsWith('trojan://') || l.startsWith('ss://') || l.startsWith('hysteria2://') || l.startsWith('hy2://')));
+    .filter((l) => l && SUPPORTED_LINK_PREFIXES.some((p) => l.startsWith(p)));
 
   const nodes: ProxyNode[] = [];
   for (const line of lines) {
@@ -45,6 +50,17 @@ export function parseProxyLinks(text: string): ProxyNode[] {
   }
   return nodes;
 }
+
+const SUPPORTED_LINK_PREFIXES = [
+  'vmess://',
+  'vless://',
+  'trojan://',
+  'ss://',
+  'hysteria2://',
+  'hy2://',
+  'tuic://',
+  'anytls://',
+];
 
 function generateId(): string {
   return Date.now().toString(36) + Math.random().toString(36).substr(2, 9);
@@ -301,6 +317,25 @@ function parseHysteria2(link: string): ProxyNode | null {
   const { userinfo: password, host: server, port, params } = uri;
   const name = decodeName(uri.fragment, `${server}:${port}`);
 
+  // QUIC obfuscation. The official hysteria2 URI scheme uses `obfs` for the
+  // type and `obfs-password` for the secret; some generators use `obfsParam`.
+  const obfs = (params.get('obfs') || '').toLowerCase();
+  const obfsPassword =
+    params.get('obfs-password') || params.get('obfs_password') || params.get('obfsParam') || '';
+
+  // Port hopping. Clients spell this `mport` (nekoray/v2rayN) or `ports`.
+  // Accepts "1000-2000,3000-4000" or "1000:2000"; sing-box wants "start:end".
+  const rawPorts = params.get('mport') || params.get('ports') || '';
+  const serverPorts = rawPorts
+    ? rawPorts
+        .split(',')
+        .map((r) => r.trim().replace('-', ':'))
+        .filter(Boolean)
+    : undefined;
+
+  const up = parseInt(params.get('upmbps') || params.get('up') || '');
+  const down = parseInt(params.get('downmbps') || params.get('down') || '');
+
   return {
     id: generateId(),
     name,
@@ -311,6 +346,93 @@ function parseHysteria2(link: string): ProxyNode | null {
     tls: true,
     sni: params.get('sni') || params.get('peer') || server,
     allowInsecure: params.get('insecure') === '1',
+    // Only "salamander" exists in sing-box 1.13; ignore anything else so we
+    // never emit an obfs type the bundled core would reject.
+    obfsType: obfs === 'salamander' ? 'salamander' : undefined,
+    obfsPassword: obfs === 'salamander' && obfsPassword ? obfsPassword : undefined,
+    serverPorts: serverPorts && serverPorts.length ? serverPorts : undefined,
+    hopInterval: params.get('hop_interval') || params.get('hopInterval') || undefined,
+    upMbps: Number.isFinite(up) && up > 0 ? up : undefined,
+    downMbps: Number.isFinite(down) && down > 0 ? down : undefined,
+    country: extractCountryFromName(name),
+  };
+}
+
+// ==================== TUIC ====================
+function parseTuic(link: string): ProxyNode | null {
+  // tuic://uuid:password@server:port?params#name
+  // TUIC v5 carries BOTH a uuid and a password in the userinfo, separated by a
+  // colon (unlike trojan/hysteria2 which only carry one secret).
+  const uri = parseUri(link);
+  if (!uri || !uri.userinfo) return null;
+  const { host: server, port, params } = uri;
+  const name = decodeName(uri.fragment, `${server}:${port}`);
+
+  const colonIdx = uri.userinfo.indexOf(':');
+  let uuid = uri.userinfo;
+  let password = '';
+  if (colonIdx !== -1) {
+    uuid = uri.userinfo.slice(0, colonIdx);
+    password = uri.userinfo.slice(colonIdx + 1);
+  }
+  try {
+    uuid = decodeURIComponent(uuid);
+    password = decodeURIComponent(password);
+  } catch {
+    /* keep raw values */
+  }
+
+  const cc = params.get('congestion_control') || params.get('congestion') || '';
+  const urm = params.get('udp_relay_mode') || '';
+
+  return {
+    id: generateId(),
+    name,
+    type: 'tuic',
+    server,
+    port,
+    uuid,
+    password,
+    // TUIC is QUIC-based, so TLS is always on.
+    tls: true,
+    sni: params.get('sni') || params.get('peer') || server,
+    allowInsecure: params.get('allow_insecure') === '1' || params.get('insecure') === '1',
+    congestionControl: (['cubic', 'new_reno', 'bbr'] as const).includes(cc as any)
+      ? (cc as ProxyNode['congestionControl'])
+      : undefined,
+    udpRelayMode: (['native', 'quic'] as const).includes(urm as any)
+      ? (urm as ProxyNode['udpRelayMode'])
+      : undefined,
+    country: extractCountryFromName(name),
+  };
+}
+
+// ==================== AnyTLS ====================
+function parseAnytls(link: string): ProxyNode | null {
+  // anytls://password@server:port?params#name
+  const uri = parseUri(link);
+  if (!uri || !uri.userinfo) return null;
+  const { host: server, port, params } = uri;
+  const name = decodeName(uri.fragment, `${server}:${port}`);
+
+  let password = uri.userinfo;
+  try {
+    password = decodeURIComponent(password);
+  } catch {
+    /* keep raw value */
+  }
+
+  return {
+    id: generateId(),
+    name,
+    type: 'anytls',
+    server,
+    port,
+    password,
+    // AnyTLS always runs over TLS.
+    tls: true,
+    sni: params.get('sni') || params.get('peer') || server,
+    allowInsecure: params.get('allow_insecure') === '1' || params.get('insecure') === '1',
     country: extractCountryFromName(name),
   };
 }
@@ -376,6 +498,8 @@ export function getProtocolColor(type: ProxyProtocol): string {
     hysteria2: '#ef4444', // red
     wireguard: '#06b6d4', // cyan
     tuic: '#ec4899',      // pink
+    anytls: '#14b8a6',    // teal
+    shadowtls: '#a855f7', // violet
   };
   return colors[type] || '#64748b';
 }

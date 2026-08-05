@@ -96,14 +96,42 @@ whitelisted IPC bridge.
 
 ## Features
 
+### Supported protocols
+
+| Protocol | Import via | Notes |
+|----------|-----------|-------|
+| **VMess** | link, Clash YAML, manual | ws/grpc/http transports |
+| **VLESS** | link, Clash YAML, manual | incl. **Reality** + XTLS Vision flow |
+| **Trojan** | link, Clash YAML, manual | |
+| **Shadowsocks** | link, Clash YAML, manual | incl. SS-2022 ciphers |
+| **Hysteria2** | link, Clash YAML, manual | QUIC-based |
+| **TUIC** | `tuic://`, Clash YAML, manual | v5; congestion control + UDP relay mode |
+| **AnyTLS** | `anytls://`, Clash YAML, manual | requires sing-box 1.12+ |
+| **ShadowTLS** | Clash YAML, manual | v1/v2/v3; wraps an inner Shadowsocks connection |
+| **WireGuard** | Clash YAML, manual | emitted as a sing-box `endpoint` (see note) |
+
+> **ShadowTLS** and **WireGuard** have no widely-agreed share-link format, so
+> they're added via manual entry or a Clash/Mihomo YAML subscription rather than
+> a `://` link.
+
+> **WireGuard note:** the sing-box WireGuard *outbound* was deprecated in 1.11
+> and **removed in 1.13**, so WireGuard nodes are generated as a top-level
+> `endpoints` entry instead. Endpoint tags are referenced by selectors and route
+> rules exactly like outbound tags, so node switching and Split rules work
+> normally.
+
 ### Core
-- Proxy link parsing — `vmess://`, `vless://` (incl. **Reality**), `trojan://`, `ss://`, `hysteria2://`/`hy2://`, IPv6 hosts
+- Proxy link parsing — `vmess://`, `vless://` (incl. **Reality**), `trojan://`, `ss://`, `hysteria2://`/`hy2://`, `tuic://`, `anytls://`, IPv6 hosts
 - Clash / Mihomo YAML subscription parsing (real YAML parser, handles nested `reality-opts`, `ws-opts`, etc.)
 - Base64 / plain-text / URL-safe subscription formats
 - **QR code import** — scan from an image file or from the clipboard
+- Supported protocols: **VMess, VLESS (incl. Reality), Trojan, Shadowsocks,
+  Hysteria2 (incl. obfs + port hopping), TUIC, AnyTLS, ShadowTLS, WireGuard**
 - sing-box **1.13-compatible** config generation (validated against the bundled binary)
 - Start / stop / restart the core with live status
 - Windows system-proxy enable/disable
+- **Node groups** — filter the node list by which subscription imported it
+- **LAN sharing** (optional) — let other devices on your network use this proxy
 - Country detection + flag emojis from node names
 - Real-time logs over WebSocket
 
@@ -248,7 +276,7 @@ Copy that folder to the same location on the new PC to bring everything with you
 | Frontend | React 18, TypeScript, Tailwind CSS, Zustand, Recharts |
 | Backend | Node.js, Express, WebSocket (ws) |
 | QR / icons | jsQR, jimp + png-to-ico (build-time icon generation) |
-| Proxy core | sing-box 1.13.12 |
+| Proxy core | sing-box 1.13.16 (upgradeable in-app) |
 | Build tool | Vite 5 |
 | Desktop | Electron 31 |
 

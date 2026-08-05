@@ -1,8 +1,8 @@
 {
   "name": "awesome-proxy",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Awesome Proxy - a proxy manager GUI for sing-box core",
-  "author": "Awesome Proxy",
+  "author": "siberiantigerking",
   "main": "dist-electron/main.js",
   "scripts": {
     "dev": "vite",
@@ -41,6 +41,7 @@
     "jimp": "^1.6.0",
     "png-to-ico": "^2.1.8",
     "postcss": "^8.4.38",
+    "rcedit": "^4.0.1",
     "tailwindcss": "^3.4.4",
     "typescript": "^5.5.2",
     "vite": "^5.3.1",
@@ -50,6 +51,7 @@
   "build": {
     "appId": "com.awesome-proxy",
     "productName": "Awesome Proxy",
+    "afterPack": "scripts/after-pack.cjs",
     "directories": {
       "output": "release"
     },
@@ -75,7 +77,13 @@
     "nsis": {
       "oneClick": false,
       "perMachine": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "installerIcon": "resources/icon.ico",
+      "uninstallerIcon": "resources/icon.ico",
+      "installerHeaderIcon": "resources/icon.ico",
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Awesome Proxy"
     },
     "extraResources": [
       {

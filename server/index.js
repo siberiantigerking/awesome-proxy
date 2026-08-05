@@ -576,7 +576,21 @@ app.post('/api/network/fetch-url', async (req, res) => {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeout);
     try {
-      const response = await fetch(url, { signal: controller.signal, redirect: 'follow' });
+      // A User-Agent is required: many subscription providers sit behind a WAF
+      // that 403s UA-less requests. Identify as clash/mihomo-compatible so
+      // panels that switch format by UA return YAML/link-list (which we can
+      // parse) rather than sing-box JSON (which we cannot).
+      const response = await fetch(url, {
+        signal: controller.signal,
+        redirect: 'follow',
+        headers: {
+          'User-Agent': 'AwesomeProxy/1.0.0 (compatible; clash; mihomo)',
+          Accept: '*/*',
+        },
+      });
+      if (!response.ok) {
+        return res.json({ error: `HTTP ${response.status} from subscription server` });
+      }
       res.json({ data: await response.text() });
     } finally {
       clearTimeout(timer);

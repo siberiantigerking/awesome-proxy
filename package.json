@@ -59,7 +59,8 @@
       "dist/**/*",
       "dist-electron/**/*",
       "shared/**/*",
-      "resources/**/*"
+      "resources/**/*",
+      "!resources/bin/**"
     ],
     "win": {
       "target": [

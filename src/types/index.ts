@@ -119,6 +119,25 @@ export interface AppSettings {
    * Off by default — an open proxy on an untrusted network is a real risk.
    */
   allowLan?: boolean;
+
+  /**
+   * How TUN/Split mode handles IPv6. This is a privacy-relevant choice, not
+   * just a connectivity one.
+   *
+   * 'block' (default) — TUN gets BOTH v4 and v6 addresses so IPv6 is captured
+   *   by the tunnel and cannot escape via the real interface, then a route rule
+   *   rejects it. Result: no WebRTC/IPv6 leak, and IPv6 fails *instantly* so
+   *   Happy Eyeballs falls back to IPv4 with no stall.
+   *
+   * 'prefer-ipv4' — TUN is dual-stack and IPv6 is actually proxied. IPv4 is
+   *   still preferred for dual-stack destinations. Needs an IPv6-capable node;
+   *   otherwise IPv6-only destinations can hang.
+   *
+   * 'ipv4-only' — legacy behaviour: TUN is IPv4-only. IPv6 is NOT captured, so
+   *   on an IPv6-capable network it bypasses the tunnel entirely and can leak
+   *   your real address. Kept only as a fallback.
+   */
+  ipv6Strategy?: 'block' | 'prefer-ipv4' | 'ipv4-only';
   remoteDns: string;
   directDns: string;
   bypassChina: boolean;

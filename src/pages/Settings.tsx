@@ -5,7 +5,7 @@ import { useNodeStore } from '../store/nodeStore';
 import { SPLIT_PRESETS } from '../services/split-presets';
 import { buildOutboundTags } from '../services/outbound-tags';
 import { reconnect } from '../services/connection';
-import type { ProxyMode, LogLevel, Theme, SplitRule } from '../types';
+import type { ProxyMode, LogLevel, Theme, SplitRule, AppSettings } from '../types';
 
 export default function Settings() {
   const { settings, updateSettings, singboxVersion, appVersion } = useSettingsStore();
@@ -163,6 +163,51 @@ export default function Settings() {
               className="input-field"
             />
           </div>
+        </div>
+      </section>
+
+      {/* IPv6 handling */}
+      <section className="card space-y-3">
+        <div className="flex items-center gap-2">
+          <Globe size={16} className="text-primary-400" />
+          <h3 className="text-sm font-medium text-surface-200">IPv6 Handling (TUN / Split)</h3>
+        </div>
+        <select
+          value={settings.ipv6Strategy || 'block'}
+          onChange={(e) => updateSettings({ ipv6Strategy: e.target.value as AppSettings['ipv6Strategy'] })}
+          className="input-field"
+        >
+          <option value="block">Block IPv6 — IPv4 first, no leak (recommended)</option>
+          <option value="prefer-ipv4">Prefer IPv4, allow IPv6 — needs an IPv6-capable node</option>
+          <option value="ipv4-only">IPv4 only (legacy) — IPv6 bypasses the tunnel</option>
+        </select>
+
+        <div className="text-[11px] text-surface-500 space-y-1">
+          {(settings.ipv6Strategy || 'block') === 'block' && (
+            <p>
+              The tunnel captures IPv6 and rejects it instantly, so your real IPv6 address can't
+              leak and IPv4 is used immediately with no delay. IPv6-only sites won't load.
+            </p>
+          )}
+          {settings.ipv6Strategy === 'prefer-ipv4' && (
+            <p>
+              IPv6 is routed through the proxy, with IPv4 preferred whenever a site supports both.
+              IPv6-only sites work <em>only</em> if your node supports IPv6 — otherwise they may
+              stall.
+            </p>
+          )}
+          {settings.ipv6Strategy === 'ipv4-only' && (
+            <p className="text-yellow-300">
+              IPv6 is not captured by the tunnel. On an IPv6-capable network it goes out over your
+              real connection, which can expose your actual IP address (including via WebRTC).
+              Only use this if the other options cause problems.
+            </p>
+          )}
+          <p className="text-surface-600">
+            Note: in System Proxy and Manual mode the browser's WebRTC sends UDP outside the proxy
+            entirely, so IPv6/WebRTC leaks can't be prevented from here — use TUN or Split if that
+            matters.
+          </p>
         </div>
       </section>
 

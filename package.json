@@ -1,6 +1,6 @@
 {
   "name": "awesome-proxy",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Awesome Proxy - a proxy manager GUI for sing-box core",
   "author": "siberiantigerking",
   "main": "dist-electron/main.js",

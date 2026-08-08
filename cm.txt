@@ -1,0 +1,33 @@
+v1.2.0: IPv6 leak control for TUN/Split
+
+Adds a Settings option controlling how IPv6 is handled in TUN and Split mode.
+This closes a real leak: the TUN interface was IPv4-only, so no IPv6 default
+route was installed and IPv6 traffic bypassed the tunnel entirely. On an
+IPv6-capable network that exits via the physical interface and can expose the
+real address, including through WebRTC STUN.
+
+The fix is to put IPv6 back on the TUN interface so it is captured, then decide
+what to do with it in the route rules. That gets both properties the old
+IPv4-only design could not have at once: no leak, and no multi-minute stall.
+
+- Block IPv6 (default): dual-stack TUN + `ip_version: 6` reject. IPv6 cannot
+  leak and fails instantly, so Happy Eyeballs falls back to IPv4 with no delay.
+- Prefer IPv4, allow IPv6: dual-stack TUN, IPv6 proxied, IPv4 preferred for
+  dual-stack destinations. Needs an IPv6-capable node.
+- IPv4 only: previous behaviour, kept as a fallback and documented as leaky.
+
+Both non-legacy options use `prefer_ipv4` instead of `ipv4_only` for DNS,
+because `ipv4_only` cannot resolve an IPv6-only proxy node, which made such a
+node impossible to connect to.
+
+Details:
+- The reject rule is emitted only when a TUN inbound exists. In System/Manual
+  mode the browser's IPv6 and its WebRTC UDP never reach sing-box, so rejecting
+  would buy no privacy while breaking IPv6-only sites reachable via the proxy.
+- The rule is ordered after `ip_is_private`, so link-local and ULA IPv6
+  (fe80::, fc00::) keep working on the LAN; only global IPv6 is rejected.
+- README documents the options and the System/Manual WebRTC limitation.
+
+Verified all 4 strategy values x 3 proxy modes pass `sing-box check` with the
+expected DNS strategy, TUN address shape and reject-rule presence. Real IPv6
+behaviour is unverified: the test machine has no global IPv6.

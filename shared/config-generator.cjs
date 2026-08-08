@@ -452,6 +452,14 @@ function generateSingboxConfig(nodes, selectedIndex, settings) {
   const splitMode = safeSettings.splitMode === 'direct' ? 'direct' : 'proxy';
   const isSplit = safeSettings.proxyMode === 'split';
 
+  // IPv6 handling for TUN/Split. See AppSettings.ipv6Strategy for the rationale.
+  // Defaults to 'block': capture IPv6 in the tunnel (so it can't leak) but
+  // reject it immediately (so it can't stall).
+  const ipv6Strategy =
+    safeSettings.ipv6Strategy === 'prefer-ipv4' || safeSettings.ipv6Strategy === 'ipv4-only'
+      ? safeSettings.ipv6Strategy
+      : 'block';
+
   // Domain-based split rules (rule_set routing)
   const domainSplitRules = Array.isArray(safeSettings.splitRules)
     ? safeSettings.splitRules.filter((r) => r && r.enabled && Array.isArray(r.ruleSets) && r.ruleSets.length > 0)
@@ -561,13 +569,19 @@ function generateSingboxConfig(nodes, selectedIndex, settings) {
         remoteDns,
         { tag: 'direct-dns', type: 'https', server: 'dns.alidns.com', path: '/dns-query', domain_resolver: 'local-dns' },
       ],
-      // Force IPv4-only resolution. Under sustained load some networks/ISPs
-      // (and the proxy server itself) become unreliable for the AAAA/IPv6
-      // path while TCP/IPv4 keeps working, which presents as "TUN works for
-      // a while, then every page stops loading" once the OS/browser keeps
-      // retrying IPv6 first (happy-eyeballs) and each attempt has to time
-      // out before falling back. Pinning DNS to ipv4_only removes that stall.
-      strategy: 'ipv4_only',
+      // IPv4-first resolution. Historically this was hard-pinned to
+      // `ipv4_only` to kill a stall: the browser would try IPv6 first
+      // (Happy Eyeballs) and each attempt had to time out before falling back,
+      // so pages appeared to hang.
+      //
+      // `prefer_ipv4` keeps that IPv4-first behaviour for dual-stack
+      // destinations while still allowing AAAA when it's the ONLY option —
+      // which matters because `ipv4_only` cannot even resolve an IPv6-only
+      // proxy node, making such a node impossible to connect to.
+      //
+      // The stall is now prevented on the routing side instead (see the TUN
+      // block and the IPv6 reject rule), which is also what closes the leak.
+      strategy: ipv6Strategy === 'ipv4-only' ? 'ipv4_only' : 'prefer_ipv4',
       rules: [
         { domain_suffix: ['.cn', '.baidu.com', '.qq.com', '.taobao.com', '.jd.com', '.alipay.com'], server: 'direct-dns' },
       ],
@@ -592,7 +606,23 @@ function generateSingboxConfig(nodes, selectedIndex, settings) {
       rules: [
         { action: 'sniff' },
         { protocol: 'dns', action: 'hijack-dns' },
+        // Private ranges stay direct. Deliberately BEFORE the IPv6 reject so
+        // link-local / ULA IPv6 (fe80::, fc00::) keeps working on the LAN.
         { ip_is_private: true, outbound: 'direct' },
+        // Reject global IPv6 in 'block' mode — but ONLY when a TUN inbound
+        // exists (TUN/Split). Because the TUN interface also has an IPv6
+        // address in that mode, IPv6 is captured by the tunnel and reaches
+        // this rule instead of escaping via the physical interface: that's
+        // what prevents the leak. Rejecting is instant, so Happy Eyeballs
+        // falls straight back to IPv4 with no stall.
+        //
+        // In System/Manual mode there is no TUN, so the browser's IPv6 (and
+        // its leaky WebRTC UDP) never enters sing-box at all. Rejecting here
+        // would buy no privacy while breaking IPv6-only sites that the proxy
+        // could otherwise reach, so we leave IPv6 alone in those modes.
+        ...(ipv6Strategy === 'block' && (safeSettings.proxyMode === 'tun' || isSplit)
+          ? [{ ip_version: 6, action: 'reject' }]
+          : []),
         ...splitRouteRules,
         ...legacySplitRules,
         ...(safeSettings.bypassChina
@@ -625,20 +655,23 @@ function generateSingboxConfig(nodes, selectedIndex, settings) {
     config.inbounds.push({
       type: 'tun',
       tag: 'tun-in',
-      // IPv4-only on purpose. dns.strategy: ipv4_only (below) only affects
-      // domains that go through sing-box's own DNS resolution — it does
-      // NOT stop the browser from dialing hardcoded IPv6 literals directly
-      // (e.g. Chrome's built-in Secure DNS providers use both an IPv4 and
-      // an IPv6 literal for the same server, such as Cloudflare's
-      // 1.1.1.1 / 2606:4700:4700::1111). Those literal connections were
-      // observed hanging for 2+ minutes before timing out through this
-      // proxy, which is what caused "TUN works, then browsing hangs/looks
-      // disconnected". Without an IPv6 address on the TUN interface, no
-      // IPv6 default route is installed, so IPv6 traffic never enters the
-      // tunnel at all — it fails fast locally (or uses the real network
-      // path) instead of hanging on the proxy, and browsers' Happy Eyeballs
-      // falls back to IPv4 quickly.
-      address: ['172.19.0.1/30'],
+      // Whether the TUN interface carries an IPv6 address decides whether an
+      // IPv6 default route exists — i.e. whether IPv6 traffic ENTERS the
+      // tunnel at all. This is independent of dns.strategy, which only affects
+      // domain resolution and cannot stop the browser dialing a hardcoded IPv6
+      // literal (Chrome's Secure DNS providers do exactly that, e.g.
+      // Cloudflare 1.1.1.1 / 2606:4700:4700::1111).
+      //
+      // 'ipv4-only' leaves IPv6 uncaptured: it then escapes via the physical
+      // interface, which both LEAKS the real address on IPv6-capable networks
+      // and was the source of the original multi-minute stall.
+      //
+      // 'block' and 'prefer-ipv4' are dual-stack so IPv6 is captured and
+      // handled by the route rules above (rejected fast, or proxied).
+      address:
+        ipv6Strategy === 'ipv4-only'
+          ? ['172.19.0.1/30']
+          : ['172.19.0.1/30', 'fdfe:dcba:9876::1/126'],
       auto_route: true,
       strict_route: true,
       // gvisor is a userspace netstack and is more resilient than the

@@ -27,6 +27,7 @@ const defaultSettings: AppSettings = {
   mixedPort: 7890,
   proxyMode: 'system',
   allowLan: false,
+  ipv6Strategy: 'block',
   remoteDns: 'https://dns.google/dns-query',
   directDns: 'https://dns.alidns.com/dns-query',
   bypassChina: true,

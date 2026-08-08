@@ -132,6 +132,7 @@ whitelisted IPC bridge.
 - Windows system-proxy enable/disable
 - **Node groups** — filter the node list by which subscription imported it
 - **LAN sharing** (optional) — let other devices on your network use this proxy
+- **IPv6 leak control** — see [IPv6 handling](#ipv6-handling-tun--split) below
 - Country detection + flag emojis from node names
 - Real-time logs over WebSocket
 
@@ -358,6 +359,37 @@ awesome-proxy/
   project root in dev mode and to `%APPDATA%\singbox-proxy-manager\` when
   installed. It's gitignored on purpose — it can contain your node tags. It's
   never bundled into the built app/installer either way.
+
+### IPv6 handling (TUN / Split)
+
+Settings → **IPv6 Handling** controls how IPv6 is treated in TUN and Split
+mode. This is a privacy setting, not only a connectivity one.
+
+Whether the TUN interface carries an IPv6 address decides whether IPv6 traffic
+**enters the tunnel at all** — it installs (or omits) the IPv6 default route.
+This is independent of `dns.strategy`, which only affects domain resolution and
+cannot stop a browser dialling a hardcoded IPv6 literal (Chrome's Secure DNS
+providers do exactly that, e.g. Cloudflare `2606:4700:4700::1111`).
+
+| Option | Behaviour |
+|---|---|
+| **Block IPv6** (default) | TUN is dual-stack, so IPv6 is captured by the tunnel and then rejected by a route rule. Your real IPv6 address cannot leak, and rejection is instant so Happy Eyeballs falls back to IPv4 with no stall. IPv6-only sites won't load. |
+| **Prefer IPv4, allow IPv6** | TUN is dual-stack and IPv6 is proxied, with IPv4 preferred for dual-stack destinations. IPv6-only sites work only if your node supports IPv6, otherwise they may stall. |
+| **IPv4 only** (legacy) | TUN is IPv4-only, so IPv6 is **not** captured. On an IPv6-capable network it exits via your real connection and can expose your actual IP, including via WebRTC. Fallback only. |
+
+Both non-legacy options use `prefer_ipv4` rather than `ipv4_only` for DNS,
+because `ipv4_only` cannot resolve an IPv6-only *proxy node* — which would make
+such a node impossible to connect to.
+
+The reject rule is only emitted in TUN/Split mode and only for **global** IPv6:
+it is ordered after the private-address rule so link-local and ULA (`fe80::`,
+`fc00::`) keep working on the LAN.
+
+**WebRTC caveat:** in System Proxy and Manual mode the browser sends WebRTC
+STUN over UDP, which the Windows system proxy does not cover, so that traffic
+never reaches sing-box. WebRTC IP leaks therefore **cannot** be prevented from
+this app in those modes — use TUN or Split if that matters to you, or disable
+WebRTC in your browser.
 
 ### Windows TUN shutdown reliability
 

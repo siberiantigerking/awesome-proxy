@@ -373,13 +373,20 @@ providers do exactly that, e.g. Cloudflare `2606:4700:4700::1111`).
 
 | Option | Behaviour |
 |---|---|
-| **Block IPv6** (default) | TUN is dual-stack, so IPv6 is captured by the tunnel and then rejected by a route rule. Your real IPv6 address cannot leak, and rejection is instant so Happy Eyeballs falls back to IPv4 with no stall. IPv6-only sites won't load. |
+| **Block IPv6** (default) | Clients are served `ipv4_only` DNS, so they are never handed an AAAA record and never attempt IPv6. The TUN is still dual-stack so hardcoded IPv6 literals are captured and rejected rather than leaking. IPv6-only sites won't load. |
 | **Prefer IPv4, allow IPv6** | TUN is dual-stack and IPv6 is proxied, with IPv4 preferred for dual-stack destinations. IPv6-only sites work only if your node supports IPv6, otherwise they may stall. |
 | **IPv4 only** (legacy) | TUN is IPv4-only, so IPv6 is **not** captured. On an IPv6-capable network it exits via your real connection and can expose your actual IP, including via WebRTC. Fallback only. |
 
-Both non-legacy options use `prefer_ipv4` rather than `ipv4_only` for DNS,
-because `ipv4_only` cannot resolve an IPv6-only *proxy node* — which would make
-such a node impossible to connect to.
+> **Why "Block IPv6" uses `ipv4_only` and not `prefer_ipv4`:** `prefer_ipv4`
+> still returns AAAA records to the client. In TUN mode the OS does its own A
+> and AAAA lookups, and because a dual-stack TUN makes Windows believe it has
+> real IPv6 connectivity, it then *prefers* IPv6 per RFC 6724. Pairing that
+> with an IPv6 reject rule produced "try IPv6, get refused" — i.e. broken
+> browsing. Withholding AAAA is what actually makes clients stay on IPv4.
+
+Regardless of the client-facing strategy, `route.default_domain_resolver` uses
+`prefer_ipv4` so an **IPv6-only proxy node** can still resolve; `ipv4_only`
+alone would make such a node impossible to connect to.
 
 The reject rule is only emitted in TUN/Split mode and only for **global** IPv6:
 it is ordered after the private-address rule so link-local and ULA (`fe80::`,

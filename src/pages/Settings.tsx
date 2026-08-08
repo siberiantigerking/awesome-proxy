@@ -185,8 +185,9 @@ export default function Settings() {
         <div className="text-[11px] text-surface-500 space-y-1">
           {(settings.ipv6Strategy || 'block') === 'block' && (
             <p>
-              The tunnel captures IPv6 and rejects it instantly, so your real IPv6 address can't
-              leak and IPv4 is used immediately with no delay. IPv6-only sites won't load.
+              Apps are never given IPv6 addresses, so they use IPv4 and never stall. Any app that
+              dials a hardcoded IPv6 address is captured by the tunnel and refused, so your real
+              IPv6 address can't leak. IPv6-only sites won't load.
             </p>
           )}
           {settings.ipv6Strategy === 'prefer-ipv4' && (

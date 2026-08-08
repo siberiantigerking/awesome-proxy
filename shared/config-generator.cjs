@@ -569,19 +569,25 @@ function generateSingboxConfig(nodes, selectedIndex, settings) {
         remoteDns,
         { tag: 'direct-dns', type: 'https', server: 'dns.alidns.com', path: '/dns-query', domain_resolver: 'local-dns' },
       ],
-      // IPv4-first resolution. Historically this was hard-pinned to
-      // `ipv4_only` to kill a stall: the browser would try IPv6 first
-      // (Happy Eyeballs) and each attempt had to time out before falling back,
-      // so pages appeared to hang.
+      // CLIENT-facing resolution strategy. This is what the browser/OS sees.
       //
-      // `prefer_ipv4` keeps that IPv4-first behaviour for dual-stack
-      // destinations while still allowing AAAA when it's the ONLY option —
-      // which matters because `ipv4_only` cannot even resolve an IPv6-only
-      // proxy node, making such a node impossible to connect to.
+      // Critical subtlety learned the hard way: `prefer_ipv4` does NOT stop
+      // AAAA records reaching the client. In TUN mode the client issues its
+      // own A and AAAA queries and sing-box answers both. Combined with a
+      // dual-stack TUN — which makes Windows believe it has real IPv6
+      // connectivity — the OS then *prefers* IPv6 per RFC 6724. So
+      // `prefer_ipv4` + reject-IPv6 meant "try IPv6 first, then get rejected",
+      // i.e. broken browsing, the exact opposite of the intent.
       //
-      // The stall is now prevented on the routing side instead (see the TUN
-      // block and the IPv6 reject rule), which is also what closes the leak.
-      strategy: ipv6Strategy === 'ipv4-only' ? 'ipv4_only' : 'prefer_ipv4',
+      // For 'block' we therefore use `ipv4_only`, which withholds AAAA from
+      // the client entirely: it simply never attempts IPv6, so there is
+      // nothing to stall on. The reject rule below then exists purely as a
+      // backstop for hardcoded IPv6 literals (which bypass DNS), keeping them
+      // captured-and-rejected instead of leaking.
+      //
+      // 'prefer-ipv4' intentionally keeps AAAA so IPv6 destinations remain
+      // reachable *through the proxy*.
+      strategy: ipv6Strategy === 'prefer-ipv4' ? 'prefer_ipv4' : 'ipv4_only',
       rules: [
         { domain_suffix: ['.cn', '.baidu.com', '.qq.com', '.taobao.com', '.jd.com', '.alipay.com'], server: 'direct-dns' },
       ],
@@ -609,12 +615,15 @@ function generateSingboxConfig(nodes, selectedIndex, settings) {
         // Private ranges stay direct. Deliberately BEFORE the IPv6 reject so
         // link-local / ULA IPv6 (fe80::, fc00::) keeps working on the LAN.
         { ip_is_private: true, outbound: 'direct' },
-        // Reject global IPv6 in 'block' mode — but ONLY when a TUN inbound
-        // exists (TUN/Split). Because the TUN interface also has an IPv6
-        // address in that mode, IPv6 is captured by the tunnel and reaches
-        // this rule instead of escaping via the physical interface: that's
-        // what prevents the leak. Rejecting is instant, so Happy Eyeballs
-        // falls straight back to IPv4 with no stall.
+        // Backstop for 'block' mode, TUN/Split only.
+        //
+        // Normal traffic never gets here because dns.strategy is `ipv4_only`,
+        // so the client is never handed an AAAA record and never tries IPv6.
+        // This rule catches what DNS cannot: hardcoded IPv6 literals (e.g.
+        // Chrome's Secure DNS providers dial 2606:4700:4700::1111 directly).
+        // Those are captured by the dual-stack TUN and rejected here rather
+        // than escaping via the physical interface, which is what would leak
+        // the real address.
         //
         // In System/Manual mode there is no TUN, so the browser's IPv6 (and
         // its leaky WebRTC UDP) never enters sing-box at all. Rejecting here
@@ -637,7 +646,12 @@ function generateSingboxConfig(nodes, selectedIndex, settings) {
         download_detour: 'direct',
       })).filter((rs) => rs.url),
       auto_detect_interface: true,
-      default_domain_resolver: { server: 'local-dns' },
+      // Resolution used for sing-box's OWN outbound dialing (i.e. resolving a
+      // node's server domain). Deliberately `prefer_ipv4` even when the
+      // client-facing dns.strategy is `ipv4_only`: that keeps AAAA away from
+      // the browser while still allowing an IPv6-only proxy node to resolve,
+      // which `ipv4_only` alone would make impossible to connect to.
+      default_domain_resolver: { server: 'local-dns', strategy: 'prefer_ipv4' },
       final: finalOutbound,
     },
     experimental: {

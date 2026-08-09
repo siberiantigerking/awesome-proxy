@@ -85,9 +85,36 @@ export interface ProxyNode {
   groupId?: string;
   subscriptionId?: string;
   latency?: number; // ms, -1 = timeout
+  /**
+   * Which kind of test produced `latency`. Without this a number is ambiguous:
+   * a TCP handshake to the server and a real request carried through the proxy
+   * mean very different things, and only the second one proves the node works.
+   */
+  latencyKind?: NodeTestKind;
   lastTested?: number; // timestamp
+  /** Download throughput in Mbps from the last speed test, if ever run. */
+  speedMbps?: number;
+  /** Whether UDP survived the tunnel on the last UDP check. */
+  udpOk?: boolean;
   country?: string; // country code for flag
 }
+
+/**
+ * The node tests offered in Node Manager.
+ *
+ * 'tcp'   TCP handshake straight to the node's host:port. Works offline, says
+ *         nothing about whether the proxy itself works.
+ * 'real'  HTTP request carried through that specific outbound, timed by
+ *         sing-box. Proves the node actually works. Needs the core running.
+ * 'udp'   SOCKS5 UDP ASSOCIATE + a real DNS query through the tunnel. Reveals
+ *         TCP-only nodes, which silently break games, QUIC and voice.
+ * 'speed' Download throughput through the tunnel.
+ *
+ * 'udp' and 'speed' run through the local proxy port, so they only describe the
+ * outbound that is currently selected — testing a specific node means switching
+ * the selector to it first and switching back afterwards.
+ */
+export type NodeTestKind = 'tcp' | 'real' | 'udp' | 'speed';
 
 // ==================== Subscription Types ====================
 
@@ -109,8 +136,21 @@ export type Theme = 'dark' | 'light' | 'system';
 export type LogLevel = 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'fatal' | 'panic';
 
 export interface AppSettings {
+  /**
+   * Extra SOCKS / HTTP listeners. These are ONLY opened when
+   * `separatePorts` is on — the `mixed` inbound on `mixedPort` already speaks
+   * both SOCKS5 and HTTP, so separate ports are pure opt-in convenience for
+   * apps that insist on a specific port number.
+   */
   socksPort: number;
   httpPort: number;
+  /**
+   * Open dedicated SOCKS and HTTP inbounds in addition to the mixed one.
+   * Off by default: extra listeners can collide with other proxy tools
+   * (v2rayN's 10808/10809, nekoray's 2080), and a port collision makes the
+   * core fail to start. Ports that duplicate another inbound are skipped.
+   */
+  separatePorts?: boolean;
   mixedPort: number;
   proxyMode: ProxyMode;
   /**
@@ -272,6 +312,15 @@ export interface ElectronAPI {
   network: {
     fetchUrl: (url: string, timeout?: number) => Promise<string>;
     testLatency: (host: string, port: number) => Promise<number>;
+    /** Real delay through one outbound, via the Clash API. -1 = unreachable. */
+    testDelay?: (tag: string, url?: string, timeout?: number) => Promise<number>;
+    /** UDP check through the local proxy port (tests the ACTIVE outbound). */
+    testUdp?: (proxyPort: number) => Promise<{ ok: boolean; ms: number; error?: string }>;
+    /** Throughput through the local proxy port (tests the ACTIVE outbound). */
+    testSpeed?: (
+      proxyPort: number,
+      options?: { url?: string; durationMs?: number }
+    ) => Promise<{ mbps: number; bytes: number; ms: number; error?: string }>;
     getLanAddresses?: () => Promise<string[]>;
   };
 }

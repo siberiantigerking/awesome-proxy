@@ -28,6 +28,22 @@ export default function Settings() {
     return () => { active = false; };
   }, []);
 
+  // Port collisions are reported rather than silently corrected: the generator
+  // skips a duplicate listener (sing-box treats duplicates as fatal), so the
+  // user needs to know that the port they typed won't actually be opened.
+  const portConflicts = React.useMemo(() => {
+    if (!settings.separatePorts) return [];
+    const problems: string[] = [];
+    const { mixedPort, socksPort, httpPort } = settings;
+    const valid = (port: number) => Number.isInteger(port) && port >= 1 && port <= 65535;
+    if (!valid(socksPort)) problems.push('SOCKS port is not a valid port number.');
+    if (!valid(httpPort)) problems.push('HTTP port is not a valid port number.');
+    if (socksPort === mixedPort) problems.push('SOCKS port is the same as the mixed port.');
+    if (httpPort === mixedPort) problems.push('HTTP port is the same as the mixed port.');
+    if (socksPort === httpPort) problems.push('SOCKS and HTTP ports are the same.');
+    return problems;
+  }, [settings.separatePorts, settings.mixedPort, settings.socksPort, settings.httpPort]);
+
   const handleSelectMode = async (mode: ProxyMode) => {
     const prev = settings.proxyMode;
     if (mode === prev) return;
@@ -135,35 +151,69 @@ export default function Settings() {
           <Server size={16} className="text-primary-400" />
           <h3 className="text-sm font-medium text-surface-200">Ports</h3>
         </div>
-        <div className="grid grid-cols-3 gap-3">
-          <div>
-            <label className="text-xs text-surface-400 mb-1 block">Mixed Port</label>
-            <input
-              type="number"
-              value={settings.mixedPort}
-              onChange={(e) => updateSettings({ mixedPort: parseInt(e.target.value) || 7890 })}
-              className="input-field"
-            />
-          </div>
-          <div>
-            <label className="text-xs text-surface-400 mb-1 block">SOCKS Port</label>
-            <input
-              type="number"
-              value={settings.socksPort}
-              onChange={(e) => updateSettings({ socksPort: parseInt(e.target.value) || 1080 })}
-              className="input-field"
-            />
-          </div>
-          <div>
-            <label className="text-xs text-surface-400 mb-1 block">HTTP Port</label>
-            <input
-              type="number"
-              value={settings.httpPort}
-              onChange={(e) => updateSettings({ httpPort: parseInt(e.target.value) || 8080 })}
-              className="input-field"
-            />
-          </div>
+        <div>
+          <label className="text-xs text-surface-400 mb-1 block">Mixed Port</label>
+          <input
+            type="number"
+            value={settings.mixedPort}
+            onChange={(e) => updateSettings({ mixedPort: parseInt(e.target.value) || 7890 })}
+            className="input-field"
+          />
+          <p className="text-[11px] text-surface-500 mt-1">
+            Accepts both SOCKS5 and HTTP on one port. This is the port System Proxy mode points
+            Windows at, and the one to use in Manual mode.
+          </p>
         </div>
+
+        <label className="flex items-start gap-2 cursor-pointer pt-1">
+          <input
+            type="checkbox"
+            checked={!!settings.separatePorts}
+            onChange={(e) => updateSettings({ separatePorts: e.target.checked })}
+            className="mt-0.5"
+          />
+          <span className="text-xs text-surface-300">
+            Also open dedicated SOCKS and HTTP ports
+            <span className="block text-[11px] text-surface-500">
+              Only needed for apps that insist on a specific port number. Off by default because an
+              extra listener can collide with another proxy tool, and a collision stops the core
+              from starting.
+            </span>
+          </span>
+        </label>
+
+        {settings.separatePorts && (
+          <>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="text-xs text-surface-400 mb-1 block">SOCKS Port</label>
+                <input
+                  type="number"
+                  value={settings.socksPort}
+                  onChange={(e) => updateSettings({ socksPort: parseInt(e.target.value) || 1080 })}
+                  className="input-field"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-surface-400 mb-1 block">HTTP Port</label>
+                <input
+                  type="number"
+                  value={settings.httpPort}
+                  onChange={(e) => updateSettings({ httpPort: parseInt(e.target.value) || 8080 })}
+                  className="input-field"
+                />
+              </div>
+            </div>
+            {portConflicts.length > 0 && (
+              <div className="rounded-lg border border-yellow-500/40 bg-yellow-500/10 px-3 py-2">
+                <p className="text-[11px] text-yellow-300">
+                  {portConflicts.join(' ')} A duplicate port is skipped instead of opened, so that
+                  listener simply won't exist.
+                </p>
+              </div>
+            )}
+          </>
+        )}
       </section>
 
       {/* IPv6 handling */}

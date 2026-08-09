@@ -12,6 +12,11 @@ const fs = require('fs');
 const path = require('path');
 const net = require('net');
 const { generateSingboxConfig } = require('../shared/config-generator.cjs');
+// Node test probes, shared with the Electron main process so both modes report
+// identical numbers.
+const { tcpPing, clashDelay, udpProbe, speedProbe } = require('../shared/node-probes.cjs');
+
+const isValidPort = (port) => Number.isInteger(port) && port >= 1 && port <= 65535;
 
 const app = express();
 const server = http.createServer(app);
@@ -600,28 +605,55 @@ app.post('/api/network/fetch-url', async (req, res) => {
   }
 });
 
-app.post('/api/network/test-latency', (req, res) => {
-  const { host, port } = req.body;
+app.post('/api/network/test-latency', async (req, res) => {
+  const { host, port } = req.body || {};
   if (typeof host !== 'string' || !/^[a-zA-Z0-9.\-:]+$/.test(host)) {
     return res.json({ latency: -1 });
   }
-  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+  if (!isValidPort(port)) {
     return res.json({ latency: -1 });
   }
-  const start = Date.now();
-  const socket = new net.Socket();
-  let settled = false;
-  const finish = (payload) => {
-    if (settled) return;
-    settled = true;
-    socket.destroy();
-    res.json(payload);
-  };
-  socket.setTimeout(5000);
-  socket.on('connect', () => finish({ latency: Date.now() - start }));
-  socket.on('timeout', () => finish({ latency: -1 }));
-  socket.on('error', () => finish({ latency: -1 }));
-  socket.connect(port, host);
+  res.json({ latency: await tcpPing(host, port, 5000) });
+});
+
+// Real latency through one specific outbound, timed by sing-box itself.
+app.post('/api/network/test-delay', async (req, res) => {
+  const { tag, url, timeout } = req.body || {};
+  if (typeof tag !== 'string' || !tag) return res.json({ latency: -1 });
+  if (url !== undefined && typeof url !== 'string') return res.json({ latency: -1 });
+  const latency = await clashDelay({
+    tag,
+    url,
+    timeout: Number.isInteger(timeout) ? timeout : 5000,
+  });
+  res.json({ latency });
+});
+
+// UDP reachability and throughput both go through the LOCAL proxy port, so they
+// describe whichever outbound the selector currently points at. The caller is
+// responsible for selecting the node under test first.
+app.post('/api/network/test-udp', async (req, res) => {
+  const { proxyPort } = req.body || {};
+  if (!isValidPort(proxyPort)) return res.json({ ok: false, ms: -1, error: 'Invalid proxy port' });
+  res.json(await udpProbe({ proxyPort }));
+});
+
+app.post('/api/network/test-speed', async (req, res) => {
+  const { proxyPort, url, durationMs } = req.body || {};
+  if (!isValidPort(proxyPort)) {
+    return res.json({ mbps: 0, bytes: 0, ms: 0, error: 'Invalid proxy port' });
+  }
+  if (url !== undefined && typeof url !== 'string') {
+    return res.json({ mbps: 0, bytes: 0, ms: 0, error: 'Invalid speed test URL' });
+  }
+  res.json(
+    await speedProbe({
+      proxyPort,
+      url,
+      // Clamp so a crafted request can't pin the server on a download.
+      durationMs: Number.isInteger(durationMs) ? Math.min(Math.max(durationMs, 1000), 15000) : 8000,
+    })
+  );
 });
 
 // ==================== Config Generator ====================

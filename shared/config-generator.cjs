@@ -107,6 +107,17 @@ const RULE_SET_URLS = {
 };
 
 /**
+ * Coerce a value to a usable TCP port, or 0 if it isn't one.
+ * Guards against the UI handing us NaN / 0 / 70000 and sing-box refusing to
+ * start on an invalid listener.
+ */
+function toPort(value) {
+  const port = Number(value);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return 0;
+  return port;
+}
+
+/**
  * Build a deterministic, unique outbound tag for a node.
  * Falls back to an index-based tag and de-duplicates collisions so the
  * selector/urtest references always resolve.
@@ -452,6 +463,11 @@ function generateSingboxConfig(nodes, selectedIndex, settings) {
   const splitMode = safeSettings.splitMode === 'direct' ? 'direct' : 'proxy';
   const isSplit = safeSettings.proxyMode === 'split';
 
+  // Local listener basics, shared by the mixed inbound and the optional
+  // dedicated SOCKS/HTTP inbounds below.
+  const listenAddress = safeSettings.allowLan ? '0.0.0.0' : '127.0.0.1';
+  const mixedPort = toPort(safeSettings.mixedPort) || 7890;
+
   // IPv6 handling for TUN/Split. See AppSettings.ipv6Strategy for the rationale.
   //
   // Defaults to 'prefer-ipv4': the TUN is dual-stack so IPv6 is captured by the
@@ -542,7 +558,11 @@ function generateSingboxConfig(nodes, selectedIndex, settings) {
       type: 'urltest',
       tag: 'auto',
       outbounds: [...tags],
-      url: 'https://www.gstatic.com/generate_204',
+      // Cloudflare's captive-portal endpoint instead of Google's: it answers
+      // 204 from anycast almost everywhere, whereas gstatic.com is blocked on
+      // some networks — and a health-check URL the node can't reach makes a
+      // perfectly good node look dead to the urltest group.
+      url: 'https://cp.cloudflare.com/generate_204',
       interval: '3m',
       tolerance: 50,
     });
@@ -561,12 +581,19 @@ function generateSingboxConfig(nodes, selectedIndex, settings) {
   //     needs no detour and no bootstrap, breaking the chicken-and-egg cycle.
   //   - `remote-dns` only routes through `proxy` when proxy nodes exist;
   //     otherwise it resolves directly (no `proxy` outbound is present).
+  // Cloudflare DoH, addressed by IP LITERAL rather than hostname.
+  //
+  // Two reasons for the literal. First it removes the bootstrap dependency
+  // entirely: a hostname (dns.google, cloudflare-dns.com) has to be resolved by
+  // local-dns first, and on a network where the local resolver is poisoned or
+  // hijacked that lookup is exactly what fails — taking the encrypted resolver
+  // down with it. Second, Cloudflare's certificate carries 1.1.1.1 as an IP SAN,
+  // so TLS still verifies properly.
   const remoteDns = {
     tag: 'remote-dns',
     type: 'https',
-    server: 'dns.google',
+    server: '1.1.1.1',
     path: '/dns-query',
-    domain_resolver: 'local-dns',
   };
   if (hasNodes) remoteDns.detour = 'proxy';
 
@@ -576,7 +603,9 @@ function generateSingboxConfig(nodes, selectedIndex, settings) {
       servers: [
         { tag: 'local-dns', type: 'local' },
         remoteDns,
-        { tag: 'direct-dns', type: 'https', server: 'dns.alidns.com', path: '/dns-query', domain_resolver: 'local-dns' },
+        // AliDNS for the China-direct split, also by IP literal (its cert
+        // carries 223.5.5.5 as an IP SAN) so it needs no bootstrap either.
+        { tag: 'direct-dns', type: 'https', server: '223.5.5.5', path: '/dns-query' },
       ],
       // CLIENT-facing resolution strategy. This is what the browser/OS sees.
       //
@@ -612,8 +641,8 @@ function generateSingboxConfig(nodes, selectedIndex, settings) {
         // Binding 0.0.0.0 exposes this proxy to the whole local network, so it
         // is strictly opt-in. Note there is no inbound authentication here —
         // anyone who can reach the port can use the proxy.
-        listen: safeSettings.allowLan ? '0.0.0.0' : '127.0.0.1',
-        listen_port: safeSettings.mixedPort || 7890,
+        listen: listenAddress,
+        listen_port: mixedPort,
       },
     ],
     outbounds,
@@ -672,6 +701,35 @@ function generateSingboxConfig(nodes, selectedIndex, settings) {
     },
   };
 
+  // Optional dedicated SOCKS / HTTP listeners.
+  //
+  // The mixed inbound above already accepts BOTH SOCKS5 and HTTP on one port,
+  // so these exist purely for apps that insist on a particular port number.
+  // They are opt-in because every extra listener is another chance to collide
+  // with a port something else already holds — and a collision makes sing-box
+  // refuse to start, which would look like "the app is broken".
+  //
+  // Ports that are invalid or duplicate an existing inbound are skipped rather
+  // than emitted, for the same reason: sing-box treats a duplicate listener as
+  // a fatal error.
+  if (safeSettings.separatePorts) {
+    const usedPorts = new Set([mixedPort]);
+    const extras = [
+      { type: 'socks', tag: 'socks-in', port: toPort(safeSettings.socksPort) },
+      { type: 'http', tag: 'http-in', port: toPort(safeSettings.httpPort) },
+    ];
+    for (const extra of extras) {
+      if (!extra.port || usedPorts.has(extra.port)) continue;
+      usedPorts.add(extra.port);
+      config.inbounds.push({
+        type: extra.type,
+        tag: extra.tag,
+        listen: listenAddress,
+        listen_port: extra.port,
+      });
+    }
+  }
+
   // TUN inbound is required for both full-tunnel TUN mode and Split mode
   // (per-app routing needs the system-level capture that TUN provides).
   if (safeSettings.proxyMode === 'tun' || isSplit) {
@@ -710,6 +768,7 @@ function generateSingboxConfig(nodes, selectedIndex, settings) {
 
 module.exports = {
   generateSingboxConfig,
+  toPort,
   nodeToOutbound,
   nodeToOutbounds,
   nodeToEndpoint,

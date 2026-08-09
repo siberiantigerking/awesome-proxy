@@ -133,11 +133,35 @@ whitelisted IPC bridge.
 - **Node groups** — filter the node list by which subscription imported it
 - **LAN sharing** (optional) — let other devices on your network use this proxy
 - **IPv6 leak control** — see [IPv6 handling](#ipv6-handling-tun--split) below
+- **Optional dedicated SOCKS / HTTP ports** — the mixed inbound already speaks
+  both protocols on one port, so these are opt-in for apps that insist on a
+  particular port number. A port that duplicates another inbound is skipped
+  (sing-box treats duplicate listeners as fatal) and the UI says so.
+- **Encrypted DNS with no bootstrap dependency** — DoH servers are addressed by
+  IP literal (Cloudflare `1.1.1.1` for remote, AliDNS `223.5.5.5` for the China
+  split). A hostname would have to be resolved by the local resolver first, and
+  on a network where that resolver is hijacked, the lookup is exactly what fails.
 - Country detection + flag emojis from node names
 - Real-time logs over WebSocket
 
 ### Nodes & Subscriptions
-- **Test All latency** — concurrent probing with per-node progress
+- **Four node tests**, picked from the dropdown next to Test All:
+  | Test | What it measures | Needs a connection? |
+  |---|---|---|
+  | **TCP ping** | Handshake time straight to the node's host:port. Doesn't prove the proxy works. | No |
+  | **Real delay** | Latency of a request actually carried through that node, timed by sing-box via the Clash API. This is the one that proves a node works end to end. | Yes |
+  | **UDP check** | Whether UDP survives the tunnel, via SOCKS5 UDP ASSOCIATE + a STUN binding request. Reveals TCP-only nodes, which silently break games, QUIC and voice chat. | Yes |
+  | **Speed test** | Download throughput through the tunnel. | Yes |
+- **Test All** covers the nodes currently visible (so the group/search filter
+  doubles as the selection), capped per run — 50 for TCP ping / real delay, 10
+  for UDP / speed — with a **Stop** button and throttled progress updates. The
+  cap exists because an uncapped run over a large subscription made the window
+  feel frozen.
+- UDP check and speed test travel through the **local proxy port**, which always
+  follows the active selector, so testing a specific node means switching to it
+  and switching back. That briefly redirects live traffic, which is why those two
+  are one-at-a-time and ask for confirmation before a batch run.
+- **Move node to top** of the list
 - **Move node to top** of the list
 - New nodes are auto-selected so they appear on the Dashboard immediately
 - **Auto-update subscriptions** on a configurable interval (hours)
@@ -309,7 +333,8 @@ awesome-proxy/
 ├── server/
 │   └── index.js                 # Web-mode Node.js backend
 ├── shared/
-│   └── config-generator.cjs     # Shared sing-box config generator
+│   ├── config-generator.cjs     # Shared sing-box config generator
+│   └── node-probes.cjs          # Node tests: tcp ping / real delay / UDP / speed
 ├── scripts/
 │   └── make-icons.cjs           # Generates icon.png/icon.ico + per-mode tray tints
 ├── src/
@@ -321,6 +346,7 @@ awesome-proxy/
 │   │   ├── qr-scanner.ts        # Decode QR codes (jsQR)
 │   │   ├── auto-update.ts       # Subscription auto-update scheduler
 │   │   ├── split-presets.ts     # Split-mode domain/rule-set presets
+│   │   ├── node-tests.ts        # Node test orchestration (select/restore dance)
 │   │   ├── connection.ts        # connect/disconnect/reconnect + live selector switching
 │   │   ├── theme.ts             # Light/dark theme application
 │   │   └── web-api.ts           # Web-mode API client

@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { ProxyNode, ConnectionStatus } from '../types';
+import type { ProxyNode, ConnectionStatus, NodeTestKind } from '../types';
 
 interface NodeStore {
   nodes: ProxyNode[];
@@ -14,7 +14,9 @@ interface NodeStore {
   removeNodes: (ids: string[]) => void;
   setSelectedIndex: (index: number) => void;
   setConnectionStatus: (status: ConnectionStatus) => void;
-  updateLatency: (id: string, latency: number) => void;
+  updateLatency: (id: string, latency: number, kind?: NodeTestKind) => void;
+  updateSpeed: (id: string, mbps: number) => void;
+  updateUdp: (id: string, ok: boolean) => void;
   getSelectedNode: () => ProxyNode | null;
   reorderNodes: (fromIndex: number, toIndex: number) => void;
   moveNodeToTop: (id: string) => void;
@@ -89,10 +91,28 @@ export const useNodeStore = create<NodeStore>((set, get) => ({
 
   setConnectionStatus: (status) => set({ connectionStatus: status }),
 
-  updateLatency: (id, latency) => {
+  // Test results are deliberately NOT persisted: a latency from last week is
+  // worse than no number at all, and they'd bloat the store on large lists.
+  updateLatency: (id, latency, kind = 'tcp') => {
     set((state) => ({
       nodes: state.nodes.map((n) =>
-        n.id === id ? { ...n, latency, lastTested: Date.now() } : n
+        n.id === id ? { ...n, latency, latencyKind: kind, lastTested: Date.now() } : n
+      ),
+    }));
+  },
+
+  updateSpeed: (id, mbps) => {
+    set((state) => ({
+      nodes: state.nodes.map((n) =>
+        n.id === id ? { ...n, speedMbps: mbps, lastTested: Date.now() } : n
+      ),
+    }));
+  },
+
+  updateUdp: (id, ok) => {
+    set((state) => ({
+      nodes: state.nodes.map((n) =>
+        n.id === id ? { ...n, udpOk: ok, lastTested: Date.now() } : n
       ),
     }));
   },

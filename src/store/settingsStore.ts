@@ -36,6 +36,7 @@ const defaultSettings: AppSettings = {
   settingsVersion: SETTINGS_VERSION,
   socksPort: 1080,
   httpPort: 8080,
+  separatePorts: false,
   mixedPort: 7890,
   proxyMode: 'system',
   allowLan: false,

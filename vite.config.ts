@@ -13,7 +13,14 @@ export default defineConfig({
           build: {
             outDir: 'dist-electron',
             rollupOptions: {
-              external: ['electron', 'electron-store', '../shared/config-generator.cjs'],
+              external: [
+                'electron',
+                'electron-store',
+                // Kept external so the shipped copy under resources/ stays the
+                // single source of truth instead of being inlined at build time.
+                '../shared/config-generator.cjs',
+                '../shared/node-probes.cjs',
+              ],
             },
           },
         },

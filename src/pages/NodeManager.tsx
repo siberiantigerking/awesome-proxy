@@ -7,10 +7,46 @@ import { useNodeStore } from '../store/nodeStore';
 import { useSubscriptionStore } from '../store/subscriptionStore';
 import { useSettingsStore } from '../store/settingsStore';
 import { parseProxyLink, parseProxyLinks, getCountryFlag, getProtocolColor } from '../services/node-parser';
-import type { ProxyNode, ProxyProtocol } from '../types';
+import {
+  runNodeTest,
+  isDisruptive,
+  isSupported,
+  requiresConnection,
+  concurrencyFor,
+  TEST_LABELS,
+  TEST_DESCRIPTIONS,
+  type TestContext,
+  type TestResult,
+} from '../services/node-tests';
+import type { NodeTestKind, ProxyNode, ProxyProtocol } from '../types';
+
+const TEST_KINDS: NodeTestKind[] = ['tcp', 'real', 'udp', 'speed'];
+
+/**
+ * Upper bound on how many nodes one "Test All" run will touch.
+ *
+ * A 40+ node subscription used to make the app feel frozen: every completed
+ * probe writes to the store and re-renders the list, and the disruptive tests
+ * also take over the selector for seconds at a time. Capping the batch keeps a
+ * run bounded and predictable — anything past the cap is simply not tested, and
+ * the UI says so rather than pretending otherwise.
+ *
+ * UDP and speed are capped far lower because each one costs seconds of real
+ * interrupted traffic, not milliseconds.
+ */
+const TEST_ALL_LIMIT: Record<NodeTestKind, number> = {
+  tcp: 50,
+  real: 50,
+  udp: 10,
+  speed: 10,
+};
+
+/** Don't re-render the progress counter more often than this (ms). */
+const PROGRESS_THROTTLE_MS = 120;
 
 export default function NodeManager() {
-  const { nodes, selectedIndex, addNode, removeNode, removeNodes, updateNode, setSelectedIndex, updateLatency, moveNodeToTop } = useNodeStore();
+  const { nodes, selectedIndex, addNode, removeNode, removeNodes, updateNode, setSelectedIndex, updateLatency, updateSpeed, updateUdp, moveNodeToTop } = useNodeStore();
+  const connectionStatus = useNodeStore((s) => s.connectionStatus);
   const settings = useSettingsStore((s) => s.settings);
   const [searchQuery, setSearchQuery] = useState('');
   const [showAddDialog, setShowAddDialog] = useState(false);
@@ -20,6 +56,13 @@ export default function NodeManager() {
   const [testingAll, setTestingAll] = useState(false);
   const [testingIds, setTestingIds] = useState<Set<string>>(new Set());
   const [testProgress, setTestProgress] = useState({ done: 0, total: 0 });
+  // Which test the Zap buttons run. TCP ping stays the default because it's the
+  // only one that works while disconnected and never touches live traffic.
+  const [testKind, setTestKind] = useState<NodeTestKind>('tcp');
+  const [testError, setTestError] = useState<string | null>(null);
+  // Set to true to make in-flight test workers stop after their current probe.
+  const abortTests = React.useRef(false);
+  const isConnected = connectionStatus === 'connected';
   // Group filter: 'all', 'manual' (nodes not from any subscription), or a
   // subscription id. Nodes are grouped by which subscription imported them.
   const [activeGroup, setActiveGroup] = useState<string>('all');
@@ -93,53 +136,108 @@ export default function NodeManager() {
     });
   };
 
-  const handleTestLatency = async (node: ProxyNode) => {
+  // Apply one test result to the store. Each kind writes a different field, so
+  // a speed test never overwrites a perfectly good latency reading.
+  const applyResult = (node: ProxyNode, result: TestResult) => {
+    if (result.kind === 'speed') {
+      updateSpeed(node.id, result.mbps ?? 0);
+    } else if (result.kind === 'udp') {
+      updateUdp(node.id, !!result.udpOk);
+    } else {
+      updateLatency(node.id, result.latency ?? -1, result.kind);
+    }
+    if (result.error) setTestError(`${node.name}: ${result.error}`);
+  };
+
+  const testCtx = (): TestContext => ({
+    nodes,
+    settings,
+    selectedIndex,
+    connected: connectionStatus === 'connected',
+  });
+
+  const handleTestNode = async (node: ProxyNode) => {
     if (!window.api) return;
+    setTestError(null);
     markTesting(node.id, true);
     try {
-      const latency = await window.api.network.testLatency(node.server, node.port);
-      updateLatency(node.id, latency);
+      applyResult(node, await runNodeTest(testKind, node, testCtx()));
     } finally {
       markTesting(node.id, false);
     }
   };
 
-  // Test every node, running a bounded number of probes in parallel so large
-  // node lists finish quickly without opening hundreds of sockets at once.
-  const handleTestAllLatency = async () => {
+  // Nodes a "Test All" run would actually touch: whatever the group/search
+  // filter is showing, capped by TEST_ALL_LIMIT. Testing the visible list (not
+  // every node ever imported) also means the filter doubles as a way to choose
+  // what gets tested.
+  const testAllTargets = useMemo(
+    () => filteredNodes.slice(0, TEST_ALL_LIMIT[testKind]),
+    [filteredNodes, testKind]
+  );
+  const testAllSkipped = filteredNodes.length - testAllTargets.length;
+
+  // Test the visible nodes. Non-disruptive probes run several at a time so long
+  // lists finish quickly; UDP and speed run strictly one at a time because each
+  // one takes over the `proxy` selector while it runs.
+  const handleTestAll = async () => {
     if (!window.api || testingAll) return;
-    const targets = nodes;
+    const targets = testAllTargets;
     if (targets.length === 0) return;
 
-    const CONCURRENCY = 8;
+    if (isDisruptive(testKind)) {
+      const seconds = testKind === 'speed' ? 8 : 6;
+      const ok = window.confirm(
+        `${TEST_LABELS[testKind]} runs through the active connection, so it has to switch to each ` +
+          `node in turn — your traffic will follow it while each test runs.\n\n` +
+          `${targets.length} node(s) x about ${seconds}s = roughly ` +
+          `${Math.ceil((targets.length * seconds) / 60)} minute(s) of interrupted browsing.\n\n` +
+          `Continue?`
+      );
+      if (!ok) return;
+    }
+
+    const concurrency = concurrencyFor(testKind);
+    const ctx = testCtx();
     let index = 0;
     let completed = 0;
+    let lastProgressAt = 0;
 
+    abortTests.current = false;
+    setTestError(null);
     setTestingAll(true);
     setTestProgress({ done: 0, total: targets.length });
     setTestingIds(new Set(targets.map((n) => n.id)));
 
     const worker = async () => {
       while (index < targets.length) {
+        if (abortTests.current) break;
         const node = targets[index++];
         try {
-          const latency = await window.api.network.testLatency(node.server, node.port);
-          updateLatency(node.id, latency);
-        } catch {
-          updateLatency(node.id, -1);
+          applyResult(node, await runNodeTest(testKind, node, ctx));
         } finally {
           markTesting(node.id, false);
           completed += 1;
-          setTestProgress({ done: completed, total: targets.length });
+          // Throttled so a fast batch doesn't re-render the list on every
+          // single completion, which is what made large runs feel frozen.
+          const now = Date.now();
+          if (completed === targets.length || now - lastProgressAt >= PROGRESS_THROTTLE_MS) {
+            lastProgressAt = now;
+            setTestProgress({ done: completed, total: targets.length });
+          }
         }
       }
     };
 
     try {
       await Promise.all(
-        Array.from({ length: Math.min(CONCURRENCY, targets.length) }, () => worker())
+        Array.from({ length: Math.min(concurrency, targets.length) }, () => worker())
       );
+      if (abortTests.current) {
+        setTestError(`${TEST_LABELS[testKind]} stopped after ${completed} of ${targets.length} nodes.`);
+      }
     } finally {
+      abortTests.current = false;
       setTestingAll(false);
       setTestingIds(new Set());
     }
@@ -234,14 +332,43 @@ export default function NodeManager() {
             className="input-field pl-9"
           />
         </div>
-        <button
-          onClick={handleTestAllLatency}
-          disabled={testingAll || nodes.length === 0}
-          className="btn-secondary flex items-center gap-1.5"
+        <select
+          value={testKind}
+          onChange={(e) => { setTestKind(e.target.value as NodeTestKind); setTestError(null); }}
+          disabled={testingAll}
+          title={TEST_DESCRIPTIONS[testKind]}
+          className="input-field !w-auto !py-1.5 text-xs"
         >
-          <Zap size={14} className={testingAll ? 'animate-pulse' : ''} />
-          {testingAll ? `Testing ${testProgress.done}/${testProgress.total}...` : 'Test All'}
-        </button>
+          {TEST_KINDS.filter((kind) => isSupported(kind)).map((kind) => (
+            <option key={kind} value={kind}>
+              {TEST_LABELS[kind]}
+            </option>
+          ))}
+        </select>
+        {testingAll ? (
+          <button
+            onClick={() => { abortTests.current = true; }}
+            className="btn-secondary flex items-center gap-1.5"
+            title="Stop after the probes that are already running"
+          >
+            <Zap size={14} className="animate-pulse" />
+            Stop ({testProgress.done}/{testProgress.total})
+          </button>
+        ) : (
+          <button
+            onClick={handleTestAll}
+            disabled={testAllTargets.length === 0 || (requiresConnection(testKind) && !isConnected)}
+            title={
+              requiresConnection(testKind) && !isConnected
+                ? `${TEST_LABELS[testKind]} needs an active connection`
+                : `Run ${TEST_LABELS[testKind]} on ${testAllTargets.length} node(s)`
+            }
+            className="btn-secondary flex items-center gap-1.5"
+          >
+            <Zap size={14} />
+            Test All{testAllTargets.length > 0 ? ` (${testAllTargets.length})` : ''}
+          </button>
+        )}
         {selectedIds.size > 0 && (
           <button onClick={handleDeleteSelected} className="btn-danger flex items-center gap-1.5">
             <Trash2 size={14} />
@@ -249,6 +376,40 @@ export default function NodeManager() {
           </button>
         )}
       </div>
+
+      {/* What the selected test actually measures, plus its caveats. */}
+      <div className="text-[11px] text-surface-500 space-y-1">
+        <p>{TEST_DESCRIPTIONS[testKind]}</p>
+        {testAllSkipped > 0 && (
+          <p className="text-yellow-300">
+            Test All covers the {testAllTargets.length} nodes shown here, up to a limit of{' '}
+            {TEST_ALL_LIMIT[testKind]} per run — {testAllSkipped} further node(s) will be skipped.
+            Filter or search to pick a different set.
+          </p>
+        )}
+        {requiresConnection(testKind) && !isConnected && (
+          <p className="text-yellow-300">
+            Connect first — this test runs through the core.
+          </p>
+        )}
+        {isDisruptive(testKind) && isConnected && (
+          <p className="text-yellow-300">
+            Switches the active node while testing, so your traffic briefly follows it.
+          </p>
+        )}
+      </div>
+
+      {testError && (
+        <div className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 flex items-start justify-between gap-3">
+          <p className="text-[11px] text-red-300">{testError}</p>
+          <button
+            onClick={() => setTestError(null)}
+            className="text-[11px] text-red-300/70 hover:text-red-200 shrink-0"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
 
       {/* Subscription groups. Only shown when there's more than one group to
           choose from, so a single-subscription setup stays uncluttered. */}
@@ -334,26 +495,53 @@ export default function NodeManager() {
                   </p>
                 </div>
 
-                {/* Latency */}
-                <div className="w-16 text-right">
+                {/* Test results. Latency is annotated with which test produced
+                    it, because a TCP handshake and a real proxied request are
+                    not the same claim. Speed / UDP show only once measured. */}
+                <div className="w-28 text-right leading-tight">
                   {testingIds.has(node.id) ? (
                     <span className="inline-block w-3.5 h-3.5 border-2 border-primary-500 border-t-transparent rounded-full animate-spin align-middle" />
-                  ) : node.latency !== undefined && node.latency >= 0 ? (
-                    <span
-                      className={`text-xs font-mono ${
-                        node.latency < 100
-                          ? 'text-green-400'
-                          : node.latency < 300
-                          ? 'text-yellow-400'
-                          : 'text-red-400'
-                      }`}
-                    >
-                      {node.latency}ms
-                    </span>
-                  ) : node.latency === -1 ? (
-                    <span className="text-xs font-mono text-red-400">timeout</span>
                   ) : (
-                    <span className="text-xs text-surface-600">-</span>
+                    <>
+                      {node.latency !== undefined && node.latency >= 0 ? (
+                        <span
+                          className={`text-xs font-mono ${
+                            node.latency < 100
+                              ? 'text-green-400'
+                              : node.latency < 300
+                              ? 'text-yellow-400'
+                              : 'text-red-400'
+                          }`}
+                          title={node.latencyKind ? TEST_LABELS[node.latencyKind] : undefined}
+                        >
+                          {node.latency}ms
+                          {node.latencyKind === 'real' && (
+                            <span className="text-surface-500"> real</span>
+                          )}
+                        </span>
+                      ) : node.latency === -1 ? (
+                        <span className="text-xs font-mono text-red-400">
+                          {node.latencyKind === 'real' ? 'failed' : 'timeout'}
+                        </span>
+                      ) : (
+                        <span className="text-xs text-surface-600">-</span>
+                      )}
+                      {(node.speedMbps !== undefined || node.udpOk !== undefined) && (
+                        <div className="text-[10px] font-mono text-surface-500">
+                          {node.speedMbps !== undefined && (
+                            <span className={node.speedMbps > 0 ? '' : 'text-red-400'}>
+                              {node.speedMbps > 0 ? `${node.speedMbps} Mbps` : 'no speed'}
+                            </span>
+                          )}
+                          {node.speedMbps !== undefined && node.udpOk !== undefined && ' · '}
+                          {node.udpOk !== undefined && (
+                            <span className={node.udpOk ? 'text-green-400' : 'text-red-400'}>
+                              {node.udpOk ? 'UDP ok' : 'no UDP'}
+                            </span>
+                          )}
+                        </div>
+                      )}
+                    </>
                   )}
                 </div>
 
@@ -368,10 +556,16 @@ export default function NodeManager() {
                     <ChevronUp size={14} />
                   </button>
                   <button
-                    onClick={(e) => { e.stopPropagation(); handleTestLatency(node); }}
+                    onClick={(e) => { e.stopPropagation(); handleTestNode(node); }}
                     className="btn-icon"
-                    title="Test latency"
-                    disabled={testingIds.has(node.id)}
+                    title={
+                      requiresConnection(testKind) && !isConnected
+                        ? `${TEST_LABELS[testKind]} needs an active connection`
+                        : `Run ${TEST_LABELS[testKind]}`
+                    }
+                    disabled={
+                      testingIds.has(node.id) || (requiresConnection(testKind) && !isConnected)
+                    }
                   >
                     <Zap size={14} className={testingIds.has(node.id) ? 'animate-pulse' : ''} />
                   </button>

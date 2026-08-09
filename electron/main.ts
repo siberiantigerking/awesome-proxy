@@ -9,6 +9,10 @@ import os from 'os';
 // Shared single-source-of-truth config generator (CommonJS module).
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { generateSingboxConfig } = require('../shared/config-generator.cjs');
+// Node test probes (tcp ping / real delay / UDP / speed), shared with the web
+// backend so both report identical numbers.
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const { tcpPing, clashDelay, udpProbe, speedProbe } = require('../shared/node-probes.cjs');
 
 // Dynamic import for electron-store (ESM module in CommonJS context)
 let store: any = null;
@@ -713,31 +717,12 @@ function clashSelect(selector: string, outbound: string): Promise<{ success: boo
   });
 }
 
+/**
+ * TCP handshake latency. Delegates to the shared probe module so Electron and
+ * the web backend can't drift into reporting different numbers.
+ */
 function testLatency(host: string, port: number): Promise<number> {
-  return new Promise((resolve) => {
-    const start = Date.now();
-    const socket = new net.Socket();
-
-    socket.setTimeout(5000);
-
-    socket.on('connect', () => {
-      const latency = Date.now() - start;
-      socket.destroy();
-      resolve(latency);
-    });
-
-    socket.on('timeout', () => {
-      socket.destroy();
-      resolve(-1);
-    });
-
-    socket.on('error', () => {
-      socket.destroy();
-      resolve(-1);
-    });
-
-    socket.connect(port, host);
-  });
+  return tcpPing(host, port, 5000);
 }
 
 // ==================== Auto Start ====================
@@ -1303,6 +1288,33 @@ function registerIpcHandlers() {
   ipcMain.handle('network:test-latency', async (_event, host: string, port: number) => {
     return await testLatency(host, port);
   });
+
+  // Real latency through one specific outbound, measured by sing-box itself.
+  // Needs the core running; leaves the active selection untouched.
+  ipcMain.handle('network:test-delay', async (_event, tag: string, url?: string, timeout?: number) => {
+    if (!singboxProcess) return -1;
+    return await clashDelay({ tag, url, timeout: timeout || 5000 });
+  });
+
+  // UDP reachability and throughput both travel through the LOCAL proxy port,
+  // so they measure whichever outbound the selector currently points at. The
+  // renderer is responsible for selecting the node under test first.
+  ipcMain.handle('network:test-udp', async (_event, proxyPort: number) => {
+    if (!singboxProcess) return { ok: false, ms: -1, error: 'Core is not running' };
+    return await udpProbe({ proxyPort: proxyPort || 7890 });
+  });
+
+  ipcMain.handle(
+    'network:test-speed',
+    async (_event, proxyPort: number, options?: { url?: string; durationMs?: number }) => {
+      if (!singboxProcess) return { mbps: 0, bytes: 0, ms: 0, error: 'Core is not running' };
+      return await speedProbe({
+        proxyPort: proxyPort || 7890,
+        url: options?.url,
+        durationMs: options?.durationMs,
+      });
+    }
+  );
 
   // This machine's LAN IPv4 addresses, so the Settings page can tell the user
   // exactly what to point other devices at when LAN sharing is enabled.

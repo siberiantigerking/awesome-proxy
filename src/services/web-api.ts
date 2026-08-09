@@ -298,5 +298,17 @@ export const webApi = {
       const result = await apiPost('/network/test-latency', { host, port });
       return result?.latency ?? -1;
     },
+    testDelay: async (tag: string, url?: string, timeout?: number) => {
+      const result = await apiPost('/network/test-delay', { tag, url, timeout });
+      return result?.latency ?? -1;
+    },
+    testUdp: async (proxyPort: number) => {
+      const result = await apiPost('/network/test-udp', { proxyPort });
+      return result || { ok: false, ms: -1, error: 'Backend not reachable' };
+    },
+    testSpeed: async (proxyPort: number, options?: { url?: string; durationMs?: number }) => {
+      const result = await apiPost('/network/test-speed', { proxyPort, ...options });
+      return result || { mbps: 0, bytes: 0, ms: 0, error: 'Backend not reachable' };
+    },
   },
 };

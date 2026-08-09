@@ -96,6 +96,11 @@ contextBridge.exposeInMainWorld('api', {
       ipcRenderer.invoke('network:fetch-url', url, timeout),
     testLatency: (host: string, port: number) =>
       ipcRenderer.invoke('network:test-latency', host, port),
+    testDelay: (tag: string, url?: string, timeout?: number) =>
+      ipcRenderer.invoke('network:test-delay', tag, url, timeout),
+    testUdp: (proxyPort: number) => ipcRenderer.invoke('network:test-udp', proxyPort),
+    testSpeed: (proxyPort: number, options?: { url?: string; durationMs?: number }) =>
+      ipcRenderer.invoke('network:test-speed', proxyPort, options),
     getLanAddresses: () => ipcRenderer.invoke('network:get-lan-addresses'),
   },
 });

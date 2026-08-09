@@ -21,13 +21,25 @@ interface SettingsStore {
   saveToStore: () => Promise<void>;
 }
 
+/**
+ * Current persisted-settings schema version.
+ *
+ * 2 — `ipv6Strategy` default moved from 'block' to 'prefer-ipv4'. Both are
+ *     leak-safe, but 'block' leaves a black-holed IPv6 default route which
+ *     degrades throughput/latency on IPv6-capable networks. Anyone still
+ *     carrying the old default is migrated once; picking 'block' again after
+ *     the migration sticks, because the version marker is already stamped.
+ */
+const SETTINGS_VERSION = 2;
+
 const defaultSettings: AppSettings = {
+  settingsVersion: SETTINGS_VERSION,
   socksPort: 1080,
   httpPort: 8080,
   mixedPort: 7890,
   proxyMode: 'system',
   allowLan: false,
-  ipv6Strategy: 'block',
+  ipv6Strategy: 'prefer-ipv4',
   remoteDns: 'https://dns.google/dns-query',
   directDns: 'https://dns.alidns.com/dns-query',
   bypassChina: true,
@@ -93,7 +105,18 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     try {
       const settings = await window.api.store.get('settings');
       if (settings) {
-        set({ settings: { ...defaultSettings, ...settings } });
+        const merged: AppSettings = { ...defaultSettings, ...settings };
+        const storedVersion = (settings as AppSettings).settingsVersion || 1;
+        if (storedVersion < SETTINGS_VERSION) {
+          if (storedVersion < 2 && merged.ipv6Strategy === 'block') {
+            merged.ipv6Strategy = 'prefer-ipv4';
+          }
+          merged.settingsVersion = SETTINGS_VERSION;
+          set({ settings: merged });
+          await get().saveToStore();
+          return;
+        }
+        set({ settings: merged });
       }
     } catch (err) {
       console.error('Failed to load settings from store:', err);

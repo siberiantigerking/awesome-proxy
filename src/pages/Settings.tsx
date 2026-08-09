@@ -1,5 +1,5 @@
 import React from 'react';
-import { Save, Monitor, Shield, Globe, Server, Palette } from '../components/Icons';
+import { Monitor, Shield, Globe, Server, Palette } from '../components/Icons';
 import { useSettingsStore } from '../store/settingsStore';
 import { useNodeStore } from '../store/nodeStore';
 import { SPLIT_PRESETS } from '../services/split-presets';
@@ -173,28 +173,29 @@ export default function Settings() {
           <h3 className="text-sm font-medium text-surface-200">IPv6 Handling (TUN / Split)</h3>
         </div>
         <select
-          value={settings.ipv6Strategy || 'block'}
+          value={settings.ipv6Strategy || 'prefer-ipv4'}
           onChange={(e) => updateSettings({ ipv6Strategy: e.target.value as AppSettings['ipv6Strategy'] })}
           className="input-field"
         >
-          <option value="block">Block IPv6 — IPv4 first, no leak (recommended)</option>
-          <option value="prefer-ipv4">Prefer IPv4, allow IPv6 — needs an IPv6-capable node</option>
+          <option value="prefer-ipv4">Prefer IPv4, allow IPv6 — no leak (recommended)</option>
+          <option value="block">Block IPv6 — no leak, forces IPv6 fully off</option>
           <option value="ipv4-only">IPv4 only (legacy) — IPv6 bypasses the tunnel</option>
         </select>
 
         <div className="text-[11px] text-surface-500 space-y-1">
-          {(settings.ipv6Strategy || 'block') === 'block' && (
+          {settings.ipv6Strategy === 'block' && (
             <p>
               Apps are never given IPv6 addresses, so they use IPv4 and never stall. Any app that
               dials a hardcoded IPv6 address is captured by the tunnel and refused, so your real
-              IPv6 address can't leak. IPv6-only sites won't load.
+              IPv6 address can't leak. IPv6-only sites won't load, and the machine keeps a
+              dead IPv6 route — on an IPv6 network that can make things feel slower.
             </p>
           )}
-          {settings.ipv6Strategy === 'prefer-ipv4' && (
+          {(settings.ipv6Strategy || 'prefer-ipv4') === 'prefer-ipv4' && (
             <p>
-              IPv6 is routed through the proxy, with IPv4 preferred whenever a site supports both.
-              IPv6-only sites work <em>only</em> if your node supports IPv6 — otherwise they may
-              stall.
+              IPv6 is captured by the tunnel and routed through the proxy, so your real IPv6
+              address still can't leak, while IPv4 is preferred whenever a site supports both.
+              IPv6-only sites work <em>only</em> if your node supports IPv6.
             </p>
           )}
           {settings.ipv6Strategy === 'ipv4-only' && (

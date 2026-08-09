@@ -453,12 +453,21 @@ function generateSingboxConfig(nodes, selectedIndex, settings) {
   const isSplit = safeSettings.proxyMode === 'split';
 
   // IPv6 handling for TUN/Split. See AppSettings.ipv6Strategy for the rationale.
-  // Defaults to 'block': capture IPv6 in the tunnel (so it can't leak) but
-  // reject it immediately (so it can't stall).
+  //
+  // Defaults to 'prefer-ipv4': the TUN is dual-stack so IPv6 is captured by the
+  // tunnel (it can never escape via the physical interface, so the real address
+  // stays hidden) and is then actually proxied. IPv4 is still preferred for
+  // dual-stack destinations.
+  //
+  // 'block' used to be the default. It is equally leak-safe but leaves the
+  // machine with a black-holed IPv6 default route, which measurably degrades
+  // behaviour on IPv6-capable networks (Windows connectivity probes retry, and
+  // anything that insists on IPv6 fails instead of working). It stays available
+  // for users who want IPv6 hard-off.
   const ipv6Strategy =
-    safeSettings.ipv6Strategy === 'prefer-ipv4' || safeSettings.ipv6Strategy === 'ipv4-only'
+    safeSettings.ipv6Strategy === 'block' || safeSettings.ipv6Strategy === 'ipv4-only'
       ? safeSettings.ipv6Strategy
-      : 'block';
+      : 'prefer-ipv4';
 
   // Domain-based split rules (rule_set routing)
   const domainSplitRules = Array.isArray(safeSettings.splitRules)

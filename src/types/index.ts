@@ -124,20 +124,30 @@ export interface AppSettings {
    * How TUN/Split mode handles IPv6. This is a privacy-relevant choice, not
    * just a connectivity one.
    *
-   * 'block' (default) — TUN gets BOTH v4 and v6 addresses so IPv6 is captured
-   *   by the tunnel and cannot escape via the real interface, then a route rule
-   *   rejects it. Result: no WebRTC/IPv6 leak, and IPv6 fails *instantly* so
-   *   Happy Eyeballs falls back to IPv4 with no stall.
+   * 'prefer-ipv4' (default) — TUN is dual-stack, so IPv6 is captured by the
+   *   tunnel and actually proxied. Your real IPv6 address is never exposed
+   *   (it cannot reach the physical interface), and IPv4 is still preferred for
+   *   dual-stack destinations. IPv6-only destinations need an IPv6-capable node.
    *
-   * 'prefer-ipv4' — TUN is dual-stack and IPv6 is actually proxied. IPv4 is
-   *   still preferred for dual-stack destinations. Needs an IPv6-capable node;
-   *   otherwise IPv6-only destinations can hang.
+   * 'block' — also dual-stack TUN, but a route rule rejects IPv6 instead of
+   *   proxying it, and clients are served `ipv4_only` DNS so they never even
+   *   attempt IPv6. Equally leak-safe, but it leaves a black-holed IPv6 default
+   *   route on the machine: Windows connectivity probes retry over it and
+   *   anything that insists on IPv6 fails outright. Use it only to force IPv6
+   *   fully off.
    *
    * 'ipv4-only' — legacy behaviour: TUN is IPv4-only. IPv6 is NOT captured, so
    *   on an IPv6-capable network it bypasses the tunnel entirely and can leak
    *   your real address. Kept only as a fallback.
    */
   ipv6Strategy?: 'block' | 'prefer-ipv4' | 'ipv4-only';
+
+  /**
+   * Schema version of the persisted settings, used for one-time migrations
+   * (see settingsStore.loadFromStore). Bump SETTINGS_VERSION when a stored
+   * value needs rewriting rather than just a new default.
+   */
+  settingsVersion?: number;
   remoteDns: string;
   directDns: string;
   bypassChina: boolean;

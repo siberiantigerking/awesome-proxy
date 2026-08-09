@@ -373,9 +373,18 @@ providers do exactly that, e.g. Cloudflare `2606:4700:4700::1111`).
 
 | Option | Behaviour |
 |---|---|
-| **Block IPv6** (default) | Clients are served `ipv4_only` DNS, so they are never handed an AAAA record and never attempt IPv6. The TUN is still dual-stack so hardcoded IPv6 literals are captured and rejected rather than leaking. IPv6-only sites won't load. |
-| **Prefer IPv4, allow IPv6** | TUN is dual-stack and IPv6 is proxied, with IPv4 preferred for dual-stack destinations. IPv6-only sites work only if your node supports IPv6, otherwise they may stall. |
+| **Prefer IPv4, allow IPv6** (default) | TUN is dual-stack, so IPv6 is captured by the tunnel and proxied — your real IPv6 address never reaches the network. IPv4 is preferred for dual-stack destinations. IPv6-only sites work only if your node supports IPv6. |
+| **Block IPv6** | Clients are served `ipv4_only` DNS, so they are never handed an AAAA record and never attempt IPv6. The TUN is still dual-stack so hardcoded IPv6 literals are captured and rejected rather than leaking. IPv6-only sites won't load. |
 | **IPv4 only** (legacy) | TUN is IPv4-only, so IPv6 is **not** captured. On an IPv6-capable network it exits via your real connection and can expose your actual IP, including via WebRTC. Fallback only. |
+
+> **Why "Prefer IPv4, allow IPv6" is the default:** both it and "Block IPv6" are
+> leak-safe, because in either case the dual-stack TUN keeps IPv6 inside the
+> tunnel. The difference is what happens next. "Block IPv6" leaves the machine
+> with an IPv6 default route that goes nowhere, so on an IPv6-capable network
+> Windows connectivity probes keep retrying over it and anything that insists on
+> IPv6 fails outright instead of working. Proxying IPv6 avoids that while giving
+> up nothing in privacy terms. "Block IPv6" is still there if you want IPv6
+> hard-off.
 
 > **Why "Block IPv6" uses `ipv4_only` and not `prefer_ipv4`:** `prefer_ipv4`
 > still returns AAAA records to the client. In TUN mode the OS does its own A

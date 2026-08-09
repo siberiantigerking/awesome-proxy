@@ -13,8 +13,13 @@ cache.db
 # Generated config written at runtime by dev-mode runs.
 sing-box-config.json
 
-# electron-builder stdout captured during manual builds.
-builder-out.txt
+# Command output captured to files during manual builds/verification.
+# (PowerShell mangles inline output, so we tee to a file and read it back.)
+builder-*.txt
+build-out.txt
+tsc-out.txt
+st.txt
+tmp-*.json
 
 # Local IDE/editor state
 .vscode/

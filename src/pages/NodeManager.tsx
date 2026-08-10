@@ -7,6 +7,8 @@ import { useNodeStore } from '../store/nodeStore';
 import { useSubscriptionStore } from '../store/subscriptionStore';
 import { useSettingsStore } from '../store/settingsStore';
 import { parseProxyLink, parseProxyLinks, getCountryFlag, getProtocolColor } from '../services/node-parser';
+import { switchNode } from '../services/connection';
+import { buildProxyLink } from '../services/node-link';
 import {
   runNodeTest,
   isDisruptive,
@@ -45,7 +47,7 @@ const TEST_ALL_LIMIT: Record<NodeTestKind, number> = {
 const PROGRESS_THROTTLE_MS = 120;
 
 export default function NodeManager() {
-  const { nodes, selectedIndex, addNode, removeNode, removeNodes, updateNode, setSelectedIndex, updateLatency, updateSpeed, updateUdp, moveNodeToTop } = useNodeStore();
+  const { nodes, selectedIndex, addNode, removeNode, removeNodes, updateNode, updateLatency, updateSpeed, updateUdp, moveNodeToTop } = useNodeStore();
   const connectionStatus = useNodeStore((s) => s.connectionStatus);
   const settings = useSettingsStore((s) => s.settings);
   const [searchQuery, setSearchQuery] = useState('');
@@ -243,8 +245,12 @@ export default function NodeManager() {
     }
   };
 
-  const handleSelectNode = (index: number) => {
-    setSelectedIndex(index);
+  // Selecting a node here used to only update `selectedIndex`, which repainted
+  // the UI while the running core kept sending traffic through the previously
+  // selected outbound. switchNode moves live traffic too.
+  const handleSelectNode = async (index: number) => {
+    const res = await switchNode(index);
+    if (!res.ok && res.error) setTestError(res.error);
   };
 
   const handleToggleSelect = (id: string) => {
@@ -262,45 +268,20 @@ export default function NodeManager() {
     setSelectedIds(new Set());
   };
 
-  const handleCopyNodeLink = (node: ProxyNode) => {
-    let link = '';
-    switch (node.type) {
-      case 'vmess':
-        link = 'vmess://' + btoa(JSON.stringify({
-          v: '2', ps: node.name, add: node.server, port: node.port,
-          id: node.uuid, aid: node.alterId || 0, scy: node.security || 'auto',
-          net: node.transportType || 'tcp', tls: node.tls ? 'tls' : '',
-          sni: node.sni || '', host: node.transportHost || '', path: node.transportPath || '',
-        }));
-        break;
-      case 'vless': {
-        const params = new URLSearchParams();
-        params.set('type', node.transportType || 'tcp');
-        if (node.realityPublicKey) {
-          params.set('security', 'reality');
-          params.set('pbk', node.realityPublicKey);
-          if (node.realityShortId) params.set('sid', node.realityShortId);
-        } else {
-          params.set('security', node.tls ? 'tls' : 'none');
-        }
-        if (node.sni) params.set('sni', node.sni);
-        if (node.fingerprint) params.set('fp', node.fingerprint);
-        if (node.flow) params.set('flow', node.flow);
-        if (node.transportPath) params.set('path', node.transportPath);
-        link = `vless://${node.uuid}@${node.server}:${node.port}?${params.toString()}#${encodeURIComponent(node.name)}`;
-        break;
-      }
-      case 'trojan':
-        link = `trojan://${node.password}@${node.server}:${node.port}?sni=${node.sni || ''}#${encodeURIComponent(node.name)}`;
-        break;
-      case 'shadowsocks':
-        link = `ss://${btoa(`${node.method}:${node.password}`)}@${node.server}:${node.port}#${encodeURIComponent(node.name)}`;
-        break;
-      case 'hysteria2':
-        link = `hysteria2://${node.password}@${node.server}:${node.port}?sni=${node.sni || ''}#${encodeURIComponent(node.name)}`;
-        break;
+  const handleCopyNodeLink = async (node: ProxyNode) => {
+    // Link building lives in services/node-link.ts and is round-trip tested
+    // against our own parser, so what we copy is what other clients can read.
+    const { link, error } = buildProxyLink(node);
+    if (error || !link) {
+      setTestError(error || 'Could not build a link for this node.');
+      return;
     }
-    navigator.clipboard.writeText(link);
+    try {
+      await navigator.clipboard.writeText(link);
+      setTestError(null);
+    } catch (err: any) {
+      setTestError(err?.message || 'Could not write to the clipboard.');
+    }
   };
 
   return (

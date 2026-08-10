@@ -117,6 +117,51 @@ async function forceSelectWithRetry(selector: string, outbound: string, attempts
 }
 
 /**
+ * Select a node and, when connected, actually move live traffic onto it.
+ *
+ * This MUST be the only way the UI changes the active node. Updating
+ * `selectedIndex` alone only repaints the UI: the running core keeps using
+ * whatever outbound its `proxy` selector points at, so the app cheerfully
+ * showed "connected via JP3" while every connection still went out through the
+ * previously selected node.
+ *
+ * Falls back to a full restart if the live switch fails, since a wrong-but-
+ * displayed node is worse than a brief reconnect.
+ */
+export async function switchNode(index: number): Promise<ConnectResult> {
+  const { nodes, connectionStatus, setSelectedIndex } = useNodeStore.getState();
+  if (index < 0 || index >= nodes.length) return { ok: false, error: 'No such node' };
+
+  setSelectedIndex(index);
+  if (connectionStatus !== 'connected' || !window.api) return { ok: true };
+
+  const { settings } = useSettingsStore.getState();
+  const tag = tagForIndex(nodes, index);
+
+  if (tag && window.api.singbox.select) {
+    try {
+      const res = await window.api.singbox.select('proxy', tag);
+      if (res && res.success) return { ok: true };
+    } catch {
+      /* fall through to a restart */
+    }
+  }
+
+  try {
+    const config = await window.api.config.generate(nodes, index, settings);
+    const configPath = await window.api.config.write(config);
+    const result = await window.api.singbox.restart(configPath);
+    if (result && result.success === false) {
+      return { ok: false, error: result.error || 'Could not switch node' };
+    }
+    if (tag) await forceSelectWithRetry('proxy', tag);
+    return { ok: true };
+  } catch (err: any) {
+    return { ok: false, error: err?.message || 'Could not switch node' };
+  }
+}
+
+/**
  * Reconnect: stop, then start fresh with the current settings. Used when the
  * proxy MODE changes while connected (different inbounds require a real
  * restart, unlike node/selector switches which go through the Clash API).

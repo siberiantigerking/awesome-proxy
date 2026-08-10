@@ -4,8 +4,7 @@ import { LineChart, Line, XAxis, YAxis, ResponsiveContainer, Tooltip } from 'rec
 import { useNodeStore } from '../store/nodeStore';
 import { useSettingsStore } from '../store/settingsStore';
 import { getCountryFlag, getProtocolColor } from '../services/node-parser';
-import { tagForIndex } from '../services/outbound-tags';
-import { connect, disconnect } from '../services/connection';
+import { connect, disconnect, switchNode } from '../services/connection';
 import type { ProxyNode } from '../types';
 
 function formatBytes(bytes: number): string {
@@ -22,7 +21,7 @@ function formatSpeed(bytesPerSec: number): string {
 }
 
 export default function Dashboard() {
-  const { nodes, selectedIndex, connectionStatus, setSelectedIndex } = useNodeStore();
+  const { nodes, selectedIndex, connectionStatus } = useNodeStore();
   const { traffic, settings } = useSettingsStore();
   const [isConnecting, setIsConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -51,22 +50,9 @@ export default function Dashboard() {
   };
 
   const handleQuickSwitch = async (index: number) => {
-    setSelectedIndex(index);
-    if (connectionStatus === 'connected' && window.api) {
-      // Switch the active node live via the Clash API selector — no restart.
-      // Restarting sing-box (especially in TUN mode) is slow and can fail to
-      // re-bind ports/adapter, which is why switching used to need a manual
-      // disconnect/reconnect.
-      const tag = tagForIndex(nodes, index);
-      if (tag && window.api.singbox.select) {
-        const res = await window.api.singbox.select('proxy', tag);
-        if (res && res.success) return;
-        // Fall back to a full restart if the live switch failed.
-      }
-      const config = await window.api.config.generate(nodes, index, settings);
-      const configPath = await window.api.config.write(config);
-      await window.api.singbox.restart(configPath);
-    }
+    // Shared with the Nodes page so both paths actually move live traffic.
+    const res = await switchNode(index);
+    if (!res.ok && res.error) setError(res.error);
   };
 
   const chartData = traffic.history.map((d, i) => ({

@@ -1,4 +1,5 @@
 import type { ProxyNode, ProxyProtocol } from '../types';
+import { decodeBase64Utf8 } from './node-link';
 
 /**
  * Parse proxy link strings into ProxyNode objects.
@@ -30,10 +31,11 @@ export function parseProxyLink(link: string): ProxyNode | null {
  * Parse multiple proxy links (one per line or separated by newlines after base64 decode)
  */
 export function parseProxyLinks(text: string): ProxyNode[] {
-  // Try base64 decode first
+  // Try base64 decode first. UTF-8 aware, and tolerant of the URL-safe
+  // alphabet / missing padding that subscription servers often use.
   let decoded = text;
   try {
-    decoded = atob(text.trim());
+    decoded = decodeBase64Utf8(text.trim());
   } catch {
     // Not base64, use as-is
   }
@@ -72,7 +74,10 @@ function parseVmess(link: string): ProxyNode | null {
   const base64 = link.replace('vmess://', '');
   let json: any;
   try {
-    json = JSON.parse(atob(base64));
+    // Must decode as UTF-8, not latin1. `atob` alone turns a name like
+    // "香港 01" into mojibake, which then shows up as garbage in the node list
+    // and in any link we re-emit.
+    json = JSON.parse(decodeBase64Utf8(base64));
   } catch {
     return null;
   }
@@ -186,6 +191,21 @@ function parseUri(link: string, defaultPort = 443): UriParts | null {
   return { userinfo, host, port, params, fragment };
 }
 
+/**
+ * Percent-decode a secret carried in the userinfo position.
+ *
+ * Required, not cosmetic: a password containing `@`, `#`, `?` or `/` has to be
+ * encoded to keep the URI parseable, so skipping the decode silently imports a
+ * literally wrong password and the node just fails to connect.
+ */
+function decodeSecret(raw: string): string {
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
+}
+
 function decodeName(fragment: string, fallback: string): string {
   if (!fragment) return fallback;
   try {
@@ -200,7 +220,8 @@ function parseVless(link: string): ProxyNode | null {
   // vless://uuid@server:port?params#name
   const uri = parseUri(link);
   if (!uri || !uri.userinfo) return null;
-  const { userinfo: uuid, host: server, port, params } = uri;
+  const { host: server, port, params } = uri;
+  const uuid = decodeSecret(uri.userinfo);
   const name = decodeName(uri.fragment, `${server}:${port}`);
 
   const security = params.get('security');
@@ -231,7 +252,8 @@ function parseTrojan(link: string): ProxyNode | null {
   // trojan://password@server:port?params#name
   const uri = parseUri(link);
   if (!uri || !uri.userinfo) return null;
-  const { userinfo: password, host: server, port, params } = uri;
+  const { host: server, port, params } = uri;
+  const password = decodeSecret(uri.userinfo);
   const name = decodeName(uri.fragment, `${server}:${port}`);
 
   return {
@@ -267,7 +289,9 @@ function parseShadowsocks(link: string): ProxyNode | null {
     const userInfo = main.slice(0, atIndex);
     const hostPart = main.slice(atIndex + 1);
     try {
-      const decoded = atob(userInfo);
+      // SIP002 links commonly use the URL-safe alphabet with no padding, which
+      // plain `atob` refuses — those links used to fail to import at all.
+      const decoded = decodeBase64Utf8(userInfo);
       const colonIndex = decoded.indexOf(':');
       method = decoded.slice(0, colonIndex);
       password = decoded.slice(colonIndex + 1);
@@ -280,7 +304,7 @@ function parseShadowsocks(link: string): ProxyNode | null {
   } else {
     // Entire thing is base64
     try {
-      const decoded = atob(main);
+      const decoded = decodeBase64Utf8(main);
       // method:password@server:port
       const atIdx = decoded.lastIndexOf('@');
       if (atIdx === -1) return null;
@@ -314,7 +338,8 @@ function parseHysteria2(link: string): ProxyNode | null {
   // hysteria2://password@server:port?params#name
   const uri = parseUri(link);
   if (!uri || !uri.userinfo) return null;
-  const { userinfo: password, host: server, port, params } = uri;
+  const { host: server, port, params } = uri;
+  const password = decodeSecret(uri.userinfo);
   const name = decodeName(uri.fragment, `${server}:${port}`);
 
   // QUIC obfuscation. The official hysteria2 URI scheme uses `obfs` for the

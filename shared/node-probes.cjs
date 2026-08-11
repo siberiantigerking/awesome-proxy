@@ -56,6 +56,12 @@ const DEFAULT_SPEED_URLS = [
 ];
 const DEFAULT_SPEED_URL = DEFAULT_SPEED_URLS[0];
 
+// A result is only trustworthy if it either moved a decent amount of data or ran
+// long enough. Either alone is fine: a genuinely slow node may move very little
+// in several seconds, and a fast one may finish the file in under a second.
+const MIN_SAMPLE_BYTES = 64 * 1024;
+const MIN_SAMPLE_MS = 2000;
+
 // STUN servers for the UDP check, tried in order. Cloudflare first, Google as
 // a fallback so a single provider being blocked doesn't produce a false "no UDP".
 const DEFAULT_STUN_SERVERS = [
@@ -411,6 +417,20 @@ function speedProbeOnce(options = {}) {
           const ms = firstByteAt ? Date.now() - firstByteAt : 0;
           if (!bytes || ms <= 0) {
             finish({ mbps: 0, bytes, ms: 0, error: 'No data received' });
+            return;
+          }
+          // A transfer that ends almost immediately after a handful of bytes is
+          // a truncated/refused download, not a speed measurement. Reporting it
+          // anyway produced absurd numbers (36 bytes over 1 ms read as
+          // "0.29 Mbps"), so treat it as a failure and let the caller fall
+          // through to the next endpoint.
+          if (bytes < MIN_SAMPLE_BYTES && ms < MIN_SAMPLE_MS) {
+            finish({
+              mbps: 0,
+              bytes,
+              ms,
+              error: `Transfer ended after ${bytes} bytes in ${ms}ms — too little to measure`,
+            });
             return;
           }
           const mbps = (bytes * 8) / (ms / 1000) / 1_000_000;

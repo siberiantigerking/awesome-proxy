@@ -215,6 +215,71 @@ function buildRequiredTls(node) {
   return tls;
 }
 
+// Shadowsocks 2022 methods take a base64-encoded key of an exact length, not a
+// free-form password. Feeding them a plain password is a FATAL error that kills
+// the whole core ("decode key: illegal base64 data"), not just that one node.
+const SS2022_KEY_BYTES = {
+  '2022-blake3-aes-128-gcm': 16,
+  '2022-blake3-aes-256-gcm': 32,
+  '2022-blake3-chacha20-poly1305': 32,
+};
+
+/** True when `value` is base64 decoding to exactly `bytes` bytes. */
+function isBase64OfLength(value, bytes) {
+  if (typeof value !== 'string' || !value) return false;
+  if (!/^[A-Za-z0-9+/_-]+={0,2}$/.test(value)) return false;
+  try {
+    return Buffer.from(value, 'base64').length === bytes;
+  } catch {
+    return false;
+  }
+}
+
+function isValidSs2022Key(method, password) {
+  const expected = SS2022_KEY_BYTES[method];
+  if (!expected) return true; // not a 2022 method, nothing to validate
+  return isBase64OfLength(password, expected);
+}
+
+/**
+ * Can this node be emitted without the core refusing to START?
+ *
+ * `sing-box check` passes some configs that then abort at service creation, so
+ * a schema-valid config is not enough. Anything rejected here is left out of the
+ * config entirely — including from the selector and urltest groups — so ONE
+ * malformed node can no longer stop every other node from working. Returns a
+ * reason string when unusable, or null when fine.
+ */
+function nodeRejectionReason(node) {
+  if (!node || typeof node !== 'object') return 'not an object';
+  if (!node.type) return 'missing protocol';
+  if (!node.server) return 'missing server address';
+  if (!toPort(node.port)) return 'invalid port';
+
+  if (node.type === 'shadowsocks' || node.type === 'shadowtls') {
+    const method = node.method || (node.type === 'shadowtls' ? 'aes-128-gcm' : 'aes-256-gcm');
+    if (!isValidSs2022Key(method, node.password)) {
+      return `method ${method} needs a base64 key of ${SS2022_KEY_BYTES[method]} bytes`;
+    }
+  }
+  if (node.type === 'wireguard') {
+    // WireGuard keys are 32 raw bytes, base64-encoded. A wrong length aborts
+    // the whole core at startup ("failed to set private_key: hex string does not
+    // fit the slice"), so a single mistyped key would take every node down.
+    if (!node.privateKey) return 'missing WireGuard private key';
+    if (!isBase64OfLength(node.privateKey, 32)) return 'WireGuard private key must be 32 bytes of base64';
+    if (!node.peerPublicKey) return 'missing WireGuard peer public key';
+    if (!isBase64OfLength(node.peerPublicKey, 32)) return 'WireGuard peer public key must be 32 bytes of base64';
+    if (node.preSharedKey && !isBase64OfLength(node.preSharedKey, 32)) {
+      return 'WireGuard pre-shared key must be 32 bytes of base64';
+    }
+  }
+  if ((node.type === 'vmess' || node.type === 'vless' || node.type === 'tuic') && !node.uuid) {
+    return 'missing uuid';
+  }
+  return null;
+}
+
 /**
  * True for protocols that must be emitted as a top-level `endpoints` entry
  * rather than an `outbounds` entry.
@@ -291,7 +356,10 @@ function nodeToOutbounds(node, tag) {
     const primary = {
       type: 'shadowsocks',
       tag,
-      method: node.method || '2022-blake3-aes-128-gcm',
+      // Deliberately NOT a 2022-blake3-* default: those require a base64 key of
+      // an exact length, so defaulting to one turns any node that omits `method`
+      // into a fatal startup error. A classic AEAD accepts any password.
+      method: node.method || 'aes-128-gcm',
       password: node.password,
       detour: helperTag,
     };
@@ -453,19 +521,39 @@ function generateSingboxConfig(nodes, selectedIndex, settings) {
   // WireGuard must become a top-level `endpoints` entry (the WireGuard
   // outbound was removed in sing-box 1.13). Endpoint tags are referenced from
   // selectors exactly like outbound tags, so `tags` stays a single flat list.
+  // Nodes that would abort core startup are skipped rather than emitted. `tags`
+  // is still built from the FULL list so it keeps matching the renderer's
+  // buildOutboundTags (used for live selector switching); only the emitted
+  // outbounds and the group memberships are filtered.
   const nodeOutbounds = [];
   const nodeEndpoints = [];
+  const usableTags = [];
+  const skipped = [];
   safeNodes.forEach((node, index) => {
-    if (isEndpointProtocol(node && node.type)) {
+    const reason = nodeRejectionReason(node);
+    if (reason) {
+      skipped.push({ tag: tags[index], reason });
+      return;
+    }
+    if (isEndpointProtocol(node.type)) {
       nodeEndpoints.push(nodeToEndpoint(node, tags[index]));
     } else {
       nodeOutbounds.push(...nodeToOutbounds(node, tags[index]));
     }
+    usableTags.push(tags[index]);
   });
 
-  const hasNodes = safeNodes.length > 0;
+  const hasNodes = usableTags.length > 0;
+  // Fall back to the first usable node when the selected one was skipped —
+  // pointing a selector at a non-existent outbound is itself a fatal error.
+  const selectedTag =
+    selectedIndex >= 0 && selectedIndex < tags.length ? tags[selectedIndex] : null;
   const defaultTag =
-    selectedIndex >= 0 && selectedIndex < tags.length ? tags[selectedIndex] : (hasNodes ? tags[0] : 'direct');
+    selectedTag && usableTags.includes(selectedTag)
+      ? selectedTag
+      : hasNodes
+      ? usableTags[0]
+      : 'direct';
 
   const splitApps = Array.isArray(safeSettings.splitApps)
     ? safeSettings.splitApps.map((s) => String(s).trim()).filter(Boolean)
@@ -511,7 +599,7 @@ function generateSingboxConfig(nodes, selectedIndex, settings) {
       // Determine the default for this selector
       let selectorDefault = rule.outbound || 'proxy';
       // The selector children: all node tags + auto + direct + proxy
-      const selectorChildren = ['proxy', 'auto', 'direct', ...tags];
+      const selectorChildren = ['proxy', 'auto', 'direct', ...usableTags];
       // If the user's chosen outbound is a specific node tag, keep it as default
       if (!selectorChildren.includes(selectorDefault)) {
         selectorDefault = 'proxy';
@@ -561,13 +649,13 @@ function generateSingboxConfig(nodes, selectedIndex, settings) {
     outbounds.push({
       type: 'selector',
       tag: 'proxy',
-      outbounds: ['auto', 'direct', ...tags],
+      outbounds: ['auto', 'direct', ...usableTags],
       default: defaultTag,
     });
     outbounds.push({
       type: 'urltest',
       tag: 'auto',
-      outbounds: [...tags],
+      outbounds: [...usableTags],
       // Cloudflare's captive-portal endpoint instead of Google's: it answers
       // 204 from anycast almost everywhere, whereas gstatic.com is blocked on
       // some networks — and a health-check URL the node can't reach makes a
@@ -778,6 +866,7 @@ function generateSingboxConfig(nodes, selectedIndex, settings) {
 
 module.exports = {
   generateSingboxConfig,
+  nodeRejectionReason,
   toPort,
   nodeToOutbound,
   nodeToOutbounds,

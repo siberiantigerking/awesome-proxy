@@ -58,7 +58,7 @@ Inspired by **nekoray**, built with modern web technology for a cleaner UI and e
 ```
 ┌─────────────────────┐     ┌─────────────────────┐     ┌──────────────────┐
 │   React Frontend    │────▶│   Node.js Backend   │────▶│   sing-box Core  │
-│  (Vite + Tailwind)  │◀────│  (Express + WS)     │◀────│   (v1.13.12)     │
+│  (Vite + Tailwind)  │◀────│  (Express + WS)     │◀────│   (v1.13.18)     │
 │   Port 5173         │     │   Port 3456 (local)  │     │   Binary         │
 └─────────────────────┘     └─────────────────────┘     └──────────────────┘
 ```
@@ -137,6 +137,13 @@ whitelisted IPC bridge.
   both protocols on one port, so these are opt-in for apps that insist on a
   particular port number. A port that duplicates another inbound is skipped
   (sing-box treats duplicate listeners as fatal) and the UI says so.
+- **A broken node can't take down the rest** — nodes whose settings would make
+  the core refuse to start (a Shadowsocks-2022 method with a non-base64 key, a
+  WireGuard key that isn't 32 bytes, a missing uuid/server/port) are left out of
+  the config entirely, including from the selector and urltest groups, and the
+  reason is written to the log. Previously one malformed node meant every node
+  stopped working, because `sing-box check` passes some configs that then abort
+  at service creation.
 - **Encrypted DNS with no bootstrap dependency** — DoH servers are addressed by
   IP literal (Cloudflare `1.1.1.1` for remote, AliDNS `223.5.5.5` for the China
   split). A hostname would have to be resolved by the local resolver first, and
@@ -301,7 +308,7 @@ Copy that folder to the same location on the new PC to bring everything with you
 | Frontend | React 18, TypeScript, Tailwind CSS, Zustand, Recharts |
 | Backend | Node.js, Express, WebSocket (ws) |
 | QR / icons | jsQR, jimp + png-to-ico (build-time icon generation) |
-| Proxy core | sing-box 1.13.16 (upgradeable in-app) |
+| Proxy core | sing-box 1.13.18 (upgradeable in-app) |
 | Build tool | Vite 5 |
 | Desktop | Electron 31 |
 

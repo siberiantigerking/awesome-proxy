@@ -8,7 +8,7 @@ import net from 'net';
 import os from 'os';
 // Shared single-source-of-truth config generator (CommonJS module).
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { generateSingboxConfig } = require('../shared/config-generator.cjs');
+const { generateSingboxConfig, nodeRejectionReason } = require('../shared/config-generator.cjs');
 // Node test probes (tcp ping / real delay / UDP / speed), shared with the web
 // backend so both report identical numbers.
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -1182,6 +1182,17 @@ function registerIpcHandlers() {
 
   // Configuration
   ipcMain.handle('config:generate', (_event, nodes, selectedIndex, settings) => {
+    // Nodes the generator had to leave out would otherwise vanish silently: the
+    // core starts fine and the user just never sees that node work. Surface the
+    // reason in the app log instead.
+    if (Array.isArray(nodes)) {
+      for (const node of nodes) {
+        const reason = nodeRejectionReason(node);
+        if (reason) {
+          addLog(`Skipped node "${(node && node.name) || '(unnamed)'}" — ${reason}`);
+        }
+      }
+    }
     return generateSingboxConfig(nodes, selectedIndex, settings);
   });
 

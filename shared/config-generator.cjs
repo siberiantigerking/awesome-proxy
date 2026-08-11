@@ -192,6 +192,16 @@ function buildOptionalTls(node) {
   }
   if (node.fingerprint) {
     tls.utls = { enabled: true, fingerprint: node.fingerprint };
+  } else if (tls.reality) {
+    // uTLS is MANDATORY for a Reality client in sing-box: without it the core
+    // refuses to start at all with
+    //   "create service: initialize outbound[N]: uTLS is required by reality
+    //    client"
+    // which surfaces to the user as the whole app failing to connect, not as a
+    // problem with one node. Reality links normally carry `fp`, but not all
+    // generators include it, so default to chrome rather than emit a config the
+    // core rejects.
+    tls.utls = { enabled: true, fingerprint: 'chrome' };
   }
   return tls;
 }

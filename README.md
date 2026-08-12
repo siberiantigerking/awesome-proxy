@@ -440,6 +440,33 @@ never reaches sing-box. WebRTC IP leaks therefore **cannot** be prevented from
 this app in those modes — use TUN or Split if that matters to you, or disable
 WebRTC in your browser.
 
+### TUN and virtual network stacks (WSL, Docker, Hyper-V)
+
+Two things matter when TUN or Split runs alongside WSL2, Docker or Hyper-V.
+
+**The TUN address avoids 172.16/12 on purpose.** sing-box's own examples use
+`172.19.0.1/30`, and that range is busy on a typical Windows machine: Docker
+Desktop and WSL NAT bridges live in 172.17–172.20, and NekoRay's TUN adapter
+takes `172.19.0.1` exactly. Two adapters claiming one address leaves Windows with
+conflicting routes, which presents as "it worked, then randomly stopped". We use
+`198.18.0.1/30` instead — the RFC 2544 benchmarking range, reserved for testing
+and used by mihomo for the same reason, so real networks and container bridges
+never occupy it.
+
+**`strict_route` can starve a shared network stack.** WSL2 in
+[mirrored networking mode](https://learn.microsoft.com/en-us/windows/wsl/wsl-config)
+shares the Windows network stack rather than sitting behind NAT, and the extra
+firewall rules that make TUN leak-proof can drop that traffic. If WSL, Docker or
+Hyper-V loses connectivity while TUN/Split is active, turn off **Strict route**
+in Settings → IPv6 Handling. The tunnel still works; it just no longer guarantees
+that nothing slips past it.
+
+A note for the WSL mirrored-mode setup specifically: exporting
+`http_proxy`/`https_proxy` to `127.0.0.1:7890` inside WSL works because mirrored
+mode shares localhost with Windows. That path goes through our mixed inbound and
+needs no LAN sharing and no TUN — so if TUN is what destabilises things, System
+Proxy mode plus those environment variables is the calmer combination.
+
 ### Windows TUN shutdown reliability
 
 sing-box needs to run its own graceful-shutdown path to release the WinTun

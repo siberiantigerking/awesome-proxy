@@ -25,6 +25,12 @@
 
 const VALID_TRANSPORTS = new Set(['ws', 'grpc', 'http', 'quic']);
 
+// TUN interface addresses. Exported so the Electron side can recognise (and
+// filter out) our own adapter when listing this machine's LAN addresses.
+const TUN_IPV4 = '198.18.0.1/30';
+const TUN_IPV6 = 'fdfe:dcba:9876::1/126';
+const TUN_IPV4_PREFIX = '198.18.0.';
+
 // ==================== Rule-Set URL Mapping ====================
 // Used by split-mode domain routing to resolve rule_set tags to remote URLs.
 
@@ -847,12 +853,26 @@ function generateSingboxConfig(nodes, selectedIndex, settings) {
       //
       // 'block' and 'prefer-ipv4' are dual-stack so IPv6 is captured and
       // handled by the route rules above (rejected fast, or proxied).
+      // 198.18.0.1/30, NOT the 172.19.0.1/30 from sing-box's own examples.
+      //
+      // 172.16/12 is crowded on a typical Windows dev machine: Docker Desktop
+      // and WSL NAT bridges sit in 172.17–172.20, and NekoRay's TUN adapter
+      // uses 172.19.0.1 — the exact address we used to take. Two adapters
+      // claiming one address gives Windows conflicting routes, which shows up as
+      // "works, then randomly stops". 198.18.0.0/15 is the RFC 2544 benchmark
+      // range, reserved for testing and used by mihomo/clash for the same
+      // reason, so real networks and container bridges never occupy it.
       address:
         ipv6Strategy === 'ipv4-only'
-          ? ['172.19.0.1/30']
-          : ['172.19.0.1/30', 'fdfe:dcba:9876::1/126'],
+          ? [TUN_IPV4]
+          : [TUN_IPV4, TUN_IPV6],
       auto_route: true,
-      strict_route: true,
+      // strict_route forces everything through the tunnel with extra firewall
+      // rules. That is what makes the tunnel leak-proof, but it also drops
+      // traffic belonging to virtual network stacks that share the host's:
+      // WSL2 in mirrored networking mode, Docker and Hyper-V. Users hitting
+      // that can turn it off and keep a working (if slightly leakier) tunnel.
+      strict_route: safeSettings.tunStrictRoute === false ? false : true,
       // gvisor is a userspace netstack and is more resilient than the
       // Windows "system" stack under sustained load/high connection churn,
       // which matches the "works for a while, then TUN stops passing
@@ -868,6 +888,9 @@ module.exports = {
   generateSingboxConfig,
   nodeRejectionReason,
   toPort,
+  TUN_IPV4,
+  TUN_IPV6,
+  TUN_IPV4_PREFIX,
   nodeToOutbound,
   nodeToOutbounds,
   nodeToEndpoint,

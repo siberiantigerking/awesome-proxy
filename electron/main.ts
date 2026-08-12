@@ -8,7 +8,11 @@ import net from 'net';
 import os from 'os';
 // Shared single-source-of-truth config generator (CommonJS module).
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { generateSingboxConfig, nodeRejectionReason } = require('../shared/config-generator.cjs');
+const {
+  generateSingboxConfig,
+  nodeRejectionReason,
+  TUN_IPV4_PREFIX,
+} = require('../shared/config-generator.cjs');
 // Node test probes (tcp ping / real delay / UDP / speed), shared with the web
 // backend so both report identical numbers.
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -1334,9 +1338,12 @@ function registerIpcHandlers() {
     const ifaces = os.networkInterfaces();
     for (const name of Object.keys(ifaces)) {
       for (const iface of ifaces[name] || []) {
-        // Skip loopback, IPv6, and our own TUN adapter (172.19.0.x).
+        // Skip loopback, IPv6, and our own TUN adapter. 172.19.0.x is the
+        // address we used before moving off Docker/WSL/NekoRay's crowded
+        // 172.16/12 space; still filtered so a leftover adapter from an older
+        // version isn't offered as a LAN address.
         if (iface.family !== 'IPv4' || iface.internal) continue;
-        if (iface.address.startsWith('172.19.0.')) continue;
+        if (iface.address.startsWith(TUN_IPV4_PREFIX) || iface.address.startsWith('172.19.0.')) continue;
         out.push(iface.address);
       }
     }

@@ -261,6 +261,25 @@ export default function Settings() {
             matters.
           </p>
         </div>
+
+        {/* Escape hatch for virtual network stacks that share the host's. */}
+        <label className="flex items-start gap-2 cursor-pointer pt-1 border-t border-surface-700/30 mt-1">
+          <input
+            type="checkbox"
+            checked={settings.tunStrictRoute !== false}
+            onChange={(e) => updateSettings({ tunStrictRoute: e.target.checked })}
+            className="mt-0.5"
+          />
+          <span className="text-xs text-surface-300">
+            Strict route (recommended)
+            <span className="block text-[11px] text-surface-500">
+              Forces every packet through the tunnel so nothing slips past. Turn it off if WSL2 in
+              mirrored networking mode, Docker or Hyper-V start losing their connection while TUN or
+              Split is active — those share the Windows network stack and the strict rules can drop
+              their traffic, which looks like the proxy randomly breaking.
+            </span>
+          </span>
+        </label>
       </section>
 
       {/* LAN sharing */}

@@ -41,6 +41,7 @@ const defaultSettings: AppSettings = {
   proxyMode: 'system',
   allowLan: false,
   ipv6Strategy: 'prefer-ipv4',
+  tunStrictRoute: true,
   remoteDns: 'https://dns.google/dns-query',
   directDns: 'https://dns.alidns.com/dns-query',
   bypassChina: true,

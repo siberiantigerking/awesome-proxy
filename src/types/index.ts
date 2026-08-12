@@ -183,6 +183,18 @@ export interface AppSettings {
   ipv6Strategy?: 'block' | 'prefer-ipv4' | 'ipv4-only';
 
   /**
+   * TUN `strict_route`. On (default) it adds firewall rules that force all
+   * traffic through the tunnel, which is what makes TUN leak-proof.
+   *
+   * Turn it OFF when a virtual network stack that shares the host's is losing
+   * connectivity: WSL2 in mirrored networking mode, Docker, or Hyper-V. Those
+   * lose packets to the strict rules, which looks like the proxy "randomly
+   * breaking". The tunnel keeps working without it, just with weaker guarantees
+   * that nothing slips past.
+   */
+  tunStrictRoute?: boolean;
+
+  /**
    * Schema version of the persisted settings, used for one-time migrations
    * (see settingsStore.loadFromStore). Bump SETTINGS_VERSION when a stored
    * value needs rewriting rather than just a new default.

@@ -164,17 +164,19 @@ export interface AppSettings {
    * How TUN/Split mode handles IPv6. This is a privacy-relevant choice, not
    * just a connectivity one.
    *
-   * 'prefer-ipv4' (default) — TUN is dual-stack, so IPv6 is captured by the
-   *   tunnel and actually proxied. Your real IPv6 address is never exposed
-   *   (it cannot reach the physical interface), and IPv4 is still preferred for
-   *   dual-stack destinations. IPv6-only destinations need an IPv6-capable node.
+   * All three serve clients `ipv4_only` DNS, so applications are never handed
+   * an AAAA record and reach for IPv4 — which every node can carry. They differ
+   * in what happens to IPv6 that shows up anyway, i.e. hardcoded IPv6 literals
+   * that bypass DNS completely (Chrome's Secure DNS providers do this).
    *
-   * 'block' — also dual-stack TUN, but a route rule rejects IPv6 instead of
-   *   proxying it, and clients are served `ipv4_only` DNS so they never even
-   *   attempt IPv6. Equally leak-safe, but it leaves a black-holed IPv6 default
-   *   route on the machine: Windows connectivity probes retry over it and
-   *   anything that insists on IPv6 fails outright. Use it only to force IPv6
-   *   fully off.
+   * 'prefer-ipv4' (default) — TUN is dual-stack, so that IPv6 is captured and
+   *   proxied. Your real IPv6 address is never exposed, and nothing is broken
+   *   outright. IPv6-only destinations still need an IPv6-capable node.
+   *
+   * 'block' — dual-stack TUN as well, but a route rule rejects IPv6 instead of
+   *   proxying it. Equally leak-safe, though it leaves a black-holed IPv6
+   *   default route: Windows connectivity probes retry over it and anything
+   *   insisting on IPv6 fails outright. Use it to force IPv6 fully off.
    *
    * 'ipv4-only' — legacy behaviour: TUN is IPv4-only. IPv6 is NOT captured, so
    *   on an IPv6-capable network it bypasses the tunnel entirely and can leak

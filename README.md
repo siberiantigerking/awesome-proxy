@@ -406,25 +406,23 @@ providers do exactly that, e.g. Cloudflare `2606:4700:4700::1111`).
 
 | Option | Behaviour |
 |---|---|
-| **Prefer IPv4, allow IPv6** (default) | TUN is dual-stack, so IPv6 is captured by the tunnel and proxied — your real IPv6 address never reaches the network. IPv4 is preferred for dual-stack destinations. IPv6-only sites work only if your node supports IPv6. |
-| **Block IPv6** | Clients are served `ipv4_only` DNS, so they are never handed an AAAA record and never attempt IPv6. The TUN is still dual-stack so hardcoded IPv6 literals are captured and rejected rather than leaking. IPv6-only sites won't load. |
+| **Prefer IPv4, allow IPv6** (default) | TUN is dual-stack, so stray IPv6 is captured and proxied. Nothing breaks outright and your real IPv6 address never reaches the network. IPv6-only sites work only if your node supports IPv6. |
+| **Block IPv6** | Dual-stack TUN as well, but a route rule rejects IPv6 instead of proxying it. Equally leak-safe. IPv6-only sites won't load, and the machine keeps a dead IPv6 route, which on an IPv6 network can feel slower. |
 | **IPv4 only** (legacy) | TUN is IPv4-only, so IPv6 is **not** captured. On an IPv6-capable network it exits via your real connection and can expose your actual IP, including via WebRTC. Fallback only. |
 
-> **Why "Prefer IPv4, allow IPv6" is the default:** both it and "Block IPv6" are
-> leak-safe, because in either case the dual-stack TUN keeps IPv6 inside the
-> tunnel. The difference is what happens next. "Block IPv6" leaves the machine
-> with an IPv6 default route that goes nowhere, so on an IPv6-capable network
-> Windows connectivity probes keep retrying over it and anything that insists on
-> IPv6 fails outright instead of working. Proxying IPv6 avoids that while giving
-> up nothing in privacy terms. "Block IPv6" is still there if you want IPv6
-> hard-off.
+All three serve clients **`ipv4_only`** DNS, so applications are never handed an
+AAAA record and reach for IPv4 — which every node can carry. What differs is only
+how IPv6 that appears **anyway** is treated, meaning hardcoded IPv6 literals that
+bypass DNS entirely.
 
-> **Why "Block IPv6" uses `ipv4_only` and not `prefer_ipv4`:** `prefer_ipv4`
-> still returns AAAA records to the client. In TUN mode the OS does its own A
-> and AAAA lookups, and because a dual-stack TUN makes Windows believe it has
-> real IPv6 connectivity, it then *prefers* IPv6 per RFC 6724. Pairing that
-> with an IPv6 reject rule produced "try IPv6, get refused" — i.e. broken
-> browsing. Withholding AAAA is what actually makes clients stay on IPv4.
+> **Why no strategy hands out AAAA:** `prefer_ipv4` sounds like the right setting
+> and is a trap. It only *orders* the answers; it still returns AAAA to the
+> client. In TUN mode the OS asks for A and AAAA separately, sing-box answers
+> both, and because the TUN is dual-stack Windows concludes IPv6 works and picks
+> it per RFC 6724. Virtually every connection then leaves over IPv6 — and if the
+> selected node is **IPv4-only**, the far end can't deliver any of it. The node
+> looks broken while the config looks perfectly fine. Withholding AAAA is what
+> actually keeps clients on IPv4.
 
 Regardless of the client-facing strategy, `route.default_domain_resolver` uses
 `prefer_ipv4` so an **IPv6-only proxy node** can still resolve; `ipv4_only`
@@ -444,14 +442,19 @@ WebRTC in your browser.
 
 Two things matter when TUN or Split runs alongside WSL2, Docker or Hyper-V.
 
-**The TUN address avoids 172.16/12 on purpose.** sing-box's own examples use
-`172.19.0.1/30`, and that range is busy on a typical Windows machine: Docker
-Desktop and WSL NAT bridges live in 172.17–172.20, and NekoRay's TUN adapter
-takes `172.19.0.1` exactly. Two adapters claiming one address leaves Windows with
-conflicting routes, which presents as "it worked, then randomly stopped". We use
-`198.18.0.1/30` instead — the RFC 2544 benchmarking range, reserved for testing
-and used by mihomo for the same reason, so real networks and container bridges
-never occupy it.
+**Both TUN addresses avoid the documentation defaults on purpose.** sing-box's
+examples use `172.19.0.1/30` and `fdfe:dcba:9876::1/126`, and because every
+client that copied those examples now claims the same pair, they collide. On one
+machine running NekoBox we confirmed its `neko-tun` adapter holding `172.19.0.1`
+**and** `fdfe:dcba:9876::1` — exactly what we used to take. 172.16/12 is crowded
+regardless: Docker Desktop and WSL NAT bridges live in 172.17–172.20. Two
+adapters claiming one address leaves Windows with conflicting routes, which
+presents as "it worked, then randomly stopped".
+
+We use `198.18.0.1/30` for IPv4 — the RFC 2544 benchmarking range, reserved for
+testing and used by mihomo for the same reason, so real networks and container
+bridges never occupy it — and `fd19:8180:9a3f::1/126` for IPv6, a randomly
+chosen ULA global ID, which is what ULA is designed for.
 
 **`strict_route` can starve a shared network stack.** WSL2 in
 [mirrored networking mode](https://learn.microsoft.com/en-us/windows/wsl/wsl-config)
@@ -459,7 +462,8 @@ shares the Windows network stack rather than sitting behind NAT, and the extra
 firewall rules that make TUN leak-proof can drop that traffic. If WSL, Docker or
 Hyper-V loses connectivity while TUN/Split is active, turn off **Strict route**
 in Settings → IPv6 Handling. The tunnel still works; it just no longer guarantees
-that nothing slips past it.
+that nothing slips past it. For reference, NekoBox ships with strict route
+**off** by default, so unticking it here gives you the same behaviour.
 
 A note for the WSL mirrored-mode setup specifically: exporting
 `http_proxy`/`https_proxy` to `127.0.0.1:7890` inside WSL works because mirrored

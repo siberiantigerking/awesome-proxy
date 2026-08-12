@@ -243,8 +243,9 @@ export default function Settings() {
           )}
           {(settings.ipv6Strategy || 'prefer-ipv4') === 'prefer-ipv4' && (
             <p>
-              IPv6 is captured by the tunnel and routed through the proxy, so your real IPv6
-              address still can't leak, while IPv4 is preferred whenever a site supports both.
+              Apps are given IPv4 addresses only, so they use IPv4 — which every node can carry.
+              Any IPv6 that appears anyway (an app dialing a hardcoded IPv6 address) is captured by
+              the tunnel and sent through the proxy, so your real IPv6 address still can't leak.
               IPv6-only sites work <em>only</em> if your node supports IPv6.
             </p>
           )}

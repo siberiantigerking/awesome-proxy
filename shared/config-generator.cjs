@@ -28,7 +28,14 @@ const VALID_TRANSPORTS = new Set(['ws', 'grpc', 'http', 'quic']);
 // TUN interface addresses. Exported so the Electron side can recognise (and
 // filter out) our own adapter when listing this machine's LAN addresses.
 const TUN_IPV4 = '198.18.0.1/30';
-const TUN_IPV6 = 'fdfe:dcba:9876::1/126';
+// Deliberately NOT fdfe:dcba:9876::1/126. That value is the one in sing-box's
+// documentation, so every client that copied the example ends up on it —
+// NekoBox/NekoRay included. Verified on a machine running both: `neko-tun` held
+// 172.19.0.1 AND fdfe:dcba:9876::1, i.e. the exact pair we used to claim.
+// A ULA is supposed to carry a randomly chosen global ID for precisely this
+// reason, so we use our own instead of the copy-pasted one. (fd19:8180 echoes
+// 198.18 from the IPv4 side purely as a mnemonic.)
+const TUN_IPV6 = 'fd19:8180:9a3f::1/126';
 const TUN_IPV4_PREFIX = '198.18.0.';
 
 // ==================== Rule-Set URL Mapping ====================
@@ -727,9 +734,24 @@ function generateSingboxConfig(nodes, selectedIndex, settings) {
       // backstop for hardcoded IPv6 literals (which bypass DNS), keeping them
       // captured-and-rejected instead of leaking.
       //
-      // 'prefer-ipv4' intentionally keeps AAAA so IPv6 destinations remain
-      // reachable *through the proxy*.
-      strategy: ipv6Strategy === 'prefer-ipv4' ? 'prefer_ipv4' : 'ipv4_only',
+      // ALL THREE strategies serve clients `ipv4_only`. 'prefer-ipv4' used to
+      // serve `prefer_ipv4`, and that was a mistake worth spelling out, because
+      // it looks harmless:
+      //
+      // `prefer_ipv4` only orders the answers, it still hands AAAA to the
+      // client. In TUN mode the OS asks for A and AAAA separately, sing-box
+      // answers both, and because the TUN is dual-stack Windows believes it has
+      // working IPv6 and picks it per RFC 6724. So virtually every connection
+      // left over IPv6 — and if the selected node is IPv4-only, the far end
+      // cannot deliver any of it. The node looks broken while the config looks
+      // fine.
+      //
+      // Withholding AAAA makes clients use IPv4, which every node can carry.
+      // What still separates the three strategies is how IPv6 that appears
+      // ANYWAY (hardcoded literals, which bypass DNS entirely) is handled:
+      // 'prefer-ipv4' proxies it, 'block' rejects it, 'ipv4-only' never
+      // captures it in the first place.
+      strategy: 'ipv4_only',
       rules: [
         { domain_suffix: ['.cn', '.baidu.com', '.qq.com', '.taobao.com', '.jd.com', '.alipay.com'], server: 'direct-dns' },
       ],

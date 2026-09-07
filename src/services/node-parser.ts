@@ -371,10 +371,11 @@ function parseHysteria2(link: string): ProxyNode | null {
     tls: true,
     sni: params.get('sni') || params.get('peer') || server,
     allowInsecure: params.get('insecure') === '1',
-    // Only "salamander" exists in sing-box 1.13; ignore anything else so we
-    // never emit an obfs type the bundled core would reject.
-    obfsType: obfs === 'salamander' ? 'salamander' : undefined,
-    obfsPassword: obfs === 'salamander' && obfsPassword ? obfsPassword : undefined,
+    // Only "salamander" (any core) and "gecko" (1.14+) exist; ignore anything
+    // else so we never carry an obfs type no core understands. A gecko node on
+    // an older core is skipped later, with the reason logged.
+    obfsType: obfs === 'salamander' || obfs === 'gecko' ? obfs : undefined,
+    obfsPassword: (obfs === 'salamander' || obfs === 'gecko') && obfsPassword ? obfsPassword : undefined,
     serverPorts: serverPorts && serverPorts.length ? serverPorts : undefined,
     hopInterval: params.get('hop_interval') || params.get('hopInterval') || undefined,
     upMbps: Number.isFinite(up) && up > 0 ? up : undefined,
@@ -525,6 +526,7 @@ export function getProtocolColor(type: ProxyProtocol): string {
     tuic: '#ec4899',      // pink
     anytls: '#14b8a6',    // teal
     shadowtls: '#a855f7', // violet
+    openvpn: '#f97316',   // orange
   };
   return colors[type] || '#64748b';
 }

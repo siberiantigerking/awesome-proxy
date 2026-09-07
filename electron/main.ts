@@ -11,6 +11,8 @@ import os from 'os';
 const {
   generateSingboxConfig,
   nodeRejectionReason,
+  nodeInactiveReason,
+  buildOutboundTags,
   TUN_IPV4_PREFIX,
 } = require('../shared/config-generator.cjs');
 // Node test probes (tcp ping / real delay / UDP / speed), shared with the web
@@ -498,6 +500,70 @@ function sanitizeHost(host: string): string {
   return host;
 }
 
+const INTERNET_SETTINGS_KEY =
+  'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings';
+
+/**
+ * Windows system-proxy bypass list (`ProxyOverride`).
+ *
+ * Previously we set only ProxyEnable/ProxyServer and never wrote this, which was
+ * a real defect with two consequences. First, with no bypass list Windows hands
+ * localhost, intranet and LAN requests to the proxy; because our route rules can
+ * only bypass a PRIVATE IP and not a hostname (sing-box resolves a destination
+ * only when an explicit `action: "resolve"` rule says so), those requests fell
+ * through to the remote node and failed — local dev servers, NAS boxes, router
+ * pages and anything reached by name. Second, we inherited whatever list another
+ * proxy tool had left behind, so behaviour depended on install history.
+ *
+ * Windows matches these as literal/wildcard patterns, NOT CIDR, so the private
+ * ranges have to be spelled out. `172.16-31` is written per octet on purpose:
+ * that span is where WSL2, Hyper-V and Docker Desktop put their virtual
+ * adapters, and proxying it is what breaks those stacks.
+ *
+ * `<local>` is Windows' token for "any hostname without a dot".
+ */
+const PROXY_BYPASS = [
+  'localhost',
+  '127.*',
+  '10.*',
+  '192.168.*',
+  ...Array.from({ length: 16 }, (_, i) => `172.${16 + i}.*`),
+  '169.254.*',
+  '*.local',
+  '<local>',
+].join(';');
+
+/**
+ * Tell Windows the proxy configuration changed.
+ *
+ * Writing the registry alone is not enough: WinINET caches proxy settings per
+ * process and only re-reads them when it receives INTERNET_OPTION_SETTINGS_CHANGED
+ * (39) followed by INTERNET_OPTION_REFRESH (37). Without this, apps already
+ * running keep using the previous settings until restarted, which looks exactly
+ * like "enabling the system proxy did nothing" or "disabling it left me offline".
+ *
+ * Best-effort: a failure here is not fatal, the registry is still correct.
+ */
+function notifyProxySettingsChanged(): Promise<void> {
+  return new Promise((resolve) => {
+    const ps = [
+      '$sig = \'[DllImport("wininet.dll", SetLastError=true)]public static extern bool InternetSetOption(IntPtr h,int o,IntPtr b,int l);\';',
+      "$t = Add-Type -MemberDefinition $sig -Name W -Namespace P -PassThru;",
+      '[void]$t::InternetSetOption([IntPtr]::Zero,39,[IntPtr]::Zero,0);',
+      '[void]$t::InternetSetOption([IntPtr]::Zero,37,[IntPtr]::Zero,0);',
+    ].join(' ');
+    execFile(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', ps],
+      { timeout: 10000 },
+      (error) => {
+        if (error) addLog(`Could not broadcast proxy change (settings still written): ${error.message}`);
+        resolve();
+      }
+    );
+  });
+}
+
 function enableSystemProxy(host: string, port: number): Promise<boolean> {
   return new Promise((resolve) => {
     // Validate inputs to prevent command injection
@@ -508,31 +574,49 @@ function enableSystemProxy(host: string, port: number): Promise<boolean> {
       return;
     }
     const proxyServer = `${host}:${port}`;
-    const regCommand = `reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v ProxyEnable /t REG_DWORD /d 1 /f && reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v ProxyServer /t REG_SZ /d "${proxyServer}" /f`;
-    exec(regCommand, (error) => {
+    const regCommand = [
+      `reg add "${INTERNET_SETTINGS_KEY}" /v ProxyEnable /t REG_DWORD /d 1 /f`,
+      `reg add "${INTERNET_SETTINGS_KEY}" /v ProxyServer /t REG_SZ /d "${proxyServer}" /f`,
+      // Written explicitly every time rather than left to whatever was there.
+      `reg add "${INTERNET_SETTINGS_KEY}" /v ProxyOverride /t REG_SZ /d "${PROXY_BYPASS}" /f`,
+    ].join(' && ');
+    exec(regCommand, async (error) => {
       if (error) {
         addLog(`Failed to enable system proxy: ${error.message}`);
         resolve(false);
-      } else {
-        addLog(`System proxy enabled: ${host}:${port}`);
-        resolve(true);
+        return;
       }
+      await notifyProxySettingsChanged();
+      addLog(`System proxy enabled: ${host}:${port} (bypassing localhost, LAN and private ranges)`);
+      resolve(true);
     });
   });
 }
 
 function disableSystemProxy(): Promise<boolean> {
   return new Promise((resolve) => {
-    const regCommand = `reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v ProxyEnable /t REG_DWORD /d 0 /f`;
-    exec(regCommand, (error) => {
-      if (error) {
-        addLog(`Failed to disable system proxy: ${error.message}`);
-        resolve(false);
-      } else {
-        addLog('System proxy disabled');
-        resolve(true);
+    // ProxyEnable is the flag that actually turns the proxy off, so success is
+    // decided on this alone.
+    exec(
+      `reg add "${INTERNET_SETTINGS_KEY}" /v ProxyEnable /t REG_DWORD /d 0 /f`,
+      (error) => {
+        if (error) {
+          addLog(`Failed to disable system proxy: ${error.message}`);
+          notifyProxySettingsChanged().then(() => resolve(false));
+          return;
+        }
+        // Drop our bypass list too: leaving it behind would silently apply to
+        // whatever proxy the user configures next, which is not ours to decide.
+        // Already-absent is the common case and not a failure, so the result is
+        // deliberately ignored.
+        exec(`reg delete "${INTERNET_SETTINGS_KEY}" /v ProxyOverride /f`, () => {
+          notifyProxySettingsChanged().then(() => {
+            addLog('System proxy disabled');
+            resolve(true);
+          });
+        });
       }
-    });
+    );
   });
 }
 
@@ -722,6 +806,51 @@ function clashSelect(selector: string, outbound: string): Promise<{ success: boo
 }
 
 /**
+ * Read a selector's CURRENTLY ACTIVE outbound from the Clash API.
+ * Endpoint: GET http://127.0.0.1:9090/proxies/{selector} -> { now: "tag", ... }
+ *
+ * Needed because a successful PUT to /proxies/{selector} only means the request
+ * was accepted. The selection that actually decides where traffic goes has to be
+ * read back, since sing-box's cache file restores a previous choice on start and
+ * silently overrides the config's `default`. Without this read-back the app can
+ * display one node while the core routes through another — which is exactly the
+ * bug that made a chosen node look ignored.
+ */
+function clashCurrentSelection(selector: string): Promise<{ success: boolean; now?: string; error?: string }> {
+  return new Promise((resolve) => {
+    const req = http.request(
+      {
+        host: '127.0.0.1',
+        port: 9090,
+        path: '/proxies/' + encodeURIComponent(selector),
+        method: 'GET',
+        timeout: 3000,
+      },
+      (res) => {
+        let data = '';
+        res.setEncoding('utf-8');
+        res.on('data', (chunk) => { data += chunk; });
+        res.on('end', () => {
+          if (res.statusCode !== 200) {
+            resolve({ success: false, error: 'Clash API returned status ' + res.statusCode });
+            return;
+          }
+          try {
+            const parsed = JSON.parse(data);
+            resolve({ success: true, now: typeof parsed?.now === 'string' ? parsed.now : undefined });
+          } catch {
+            resolve({ success: false, error: 'Could not parse Clash API response' });
+          }
+        });
+      }
+    );
+    req.on('error', (err) => resolve({ success: false, error: err.message }));
+    req.on('timeout', () => { req.destroy(); resolve({ success: false, error: 'Clash API timeout' }); });
+    req.end();
+  });
+}
+
+/**
  * TCP handshake latency. Delegates to the shared probe module so Electron and
  * the web backend can't drift into reporting different numbers.
  */
@@ -859,6 +988,20 @@ function getSingboxVersionStr(): Promise<string> {
       resolve(match ? match[1] : '0.0.0');
     });
   });
+}
+
+/**
+ * Cached core version, used to decide which config surface to generate.
+ *
+ * Cached because config generation happens on every connect and mode change,
+ * and shelling out to the binary each time would be wasteful. Cleared after a
+ * core upgrade so the very next config picks up the new surface.
+ */
+let cachedCoreVersion: string | null = null;
+
+async function getCoreVersionCached(): Promise<string> {
+  if (cachedCoreVersion === null) cachedCoreVersion = await getSingboxVersionStr();
+  return cachedCoreVersion;
 }
 
 /** Compare two dotted numeric versions. Returns >0 if a>b, <0 if a<b, 0 if equal. */
@@ -1093,6 +1236,9 @@ async function upgradeSingboxCore(): Promise<{
   try { fs.rmSync(extractDir, { recursive: true, force: true }); } catch { /* ignore */ }
   try { fs.rmSync(backup, { force: true }); } catch { /* ignore */ }
 
+  // The binary changed, so the cached version — and with it the set of config
+  // fields we're allowed to emit — is now stale.
+  cachedCoreVersion = null;
   const newVer = await getSingboxVersionStr();
   sendUpgradeProgress({ stage: 'done' });
   return { success: true, upgraded: true, current: newVer, latest: info.latest };
@@ -1154,6 +1300,12 @@ function registerIpcHandlers() {
     return await clashSelect(selector, outbound);
   });
 
+  // Read back which outbound a selector is ACTUALLY using, so the renderer can
+  // confirm a selection took effect rather than trusting the PUT's status code.
+  ipcMain.handle('singbox:selection', async (_event, selector: string) => {
+    return await clashCurrentSelection(selector);
+  });
+
   // Let the renderer report the active proxy mode so the tray icon can be
   // tinted accordingly (system=blue, tun=red, split=purple, manual=amber).
   ipcMain.handle('tray:set-mode', (_event, mode: string) => {
@@ -1185,19 +1337,40 @@ function registerIpcHandlers() {
   });
 
   // Configuration
-  ipcMain.handle('config:generate', (_event, nodes, selectedIndex, settings) => {
+  ipcMain.handle('config:generate', async (_event, nodes, selectedIndex, settings) => {
+    // Which core will run this config decides which fields are legal to emit,
+    // so detect it rather than assuming the one we shipped with — Settings →
+    // About can upgrade the core independently of the app.
+    const coreVersion = await getCoreVersionCached();
     // Nodes the generator had to leave out would otherwise vanish silently: the
     // core starts fine and the user just never sees that node work. Surface the
     // reason in the app log instead.
     if (Array.isArray(nodes)) {
-      for (const node of nodes) {
-        const reason = nodeRejectionReason(node);
+      const tags = buildOutboundTags(nodes);
+      const selectedTag =
+        selectedIndex >= 0 && selectedIndex < tags.length ? tags[selectedIndex] : null;
+      nodes.forEach((node: any, index: number) => {
+        const name = (node && node.name) || '(unnamed)';
+        const reason = nodeRejectionReason(node, coreVersion);
         if (reason) {
-          addLog(`Skipped node "${(node && node.name) || '(unnamed)'}" — ${reason}`);
+          addLog(`Skipped node "${name}" — ${reason}`);
+          return;
         }
-      }
+        // Not broken, just not part of THIS config. Worth saying out loud,
+        // because "I imported three OpenVPN profiles and only one works" is
+        // otherwise indistinguishable from a bug.
+        const inactive = nodeInactiveReason(node, tags[index], selectedTag);
+        if (inactive) addLog(`Left out node "${name}" — ${inactive}`);
+      });
     }
-    return generateSingboxConfig(nodes, selectedIndex, settings);
+    return generateSingboxConfig(nodes, selectedIndex, {
+      ...settings,
+      coreVersion,
+      // Keep the core's cache next to the config instead of letting it land in
+      // whatever directory the core was spawned from. See the cache_file notes
+      // in the config generator.
+      cacheFilePath: path.join(app.getPath('userData'), 'cache.db'),
+    });
   });
 
   ipcMain.handle('config:write', (_event, config) => {

@@ -58,7 +58,7 @@ Inspired by **nekoray**, built with modern web technology for a cleaner UI and e
 ```
 ┌─────────────────────┐     ┌─────────────────────┐     ┌──────────────────┐
 │   React Frontend    │────▶│   Node.js Backend   │────▶│   sing-box Core  │
-│  (Vite + Tailwind)  │◀────│  (Express + WS)     │◀────│   (v1.13.18)     │
+│  (Vite + Tailwind)  │◀────│  (Express + WS)     │◀────│   (v1.14.0)      │
 │   Port 5173         │     │   Port 3456 (local)  │     │   Binary         │
 └─────────────────────┘     └─────────────────────┘     └──────────────────┘
 ```
@@ -80,8 +80,11 @@ whitelisted IPC bridge.
 
 ### Shared
 - `shared/config-generator.cjs` — single source of truth that turns nodes into a
-  sing-box 1.13 config, used by **both** the web server and the Electron main
-  process so they can never drift apart.
+  sing-box config, used by **both** the web server and the Electron main
+  process so they can never drift apart. It also **gates fields by core
+  version**, because Settings → About can upgrade sing-box independently of the
+  app: a field the running core doesn't know is rejected outright, so the
+  generator is told which core it is generating for and emits accordingly.
 
 ### Pages
 | Page | Description |
@@ -109,10 +112,42 @@ whitelisted IPC bridge.
 | **AnyTLS** | `anytls://`, Clash YAML, manual | requires sing-box 1.12+ |
 | **ShadowTLS** | Clash YAML, manual | v1/v2/v3; wraps an inner Shadowsocks connection |
 | **WireGuard** | Clash YAML, manual | emitted as a sing-box `endpoint` (see note) |
+| **OpenVPN** | `.ovpn` file | TLS mode only; needs core 1.14+. Emitted as an `openvpn-client` endpoint |
 
 > **ShadowTLS** and **WireGuard** have no widely-agreed share-link format, so
 > they're added via manual entry or a Clash/Mihomo YAML subscription rather than
-> a `://` link.
+> a `://` link. **OpenVPN** has none either — import the `.ovpn` profile via
+> **Import → Import .ovpn File**.
+
+> **OpenVPN notes.** The importer reads `remote`, `proto`, `port`, the inline
+> `<ca>` / `<cert>` / `<key>` / `<tls-auth>` / `<tls-crypt>` blocks,
+> `key-direction`, `data-ciphers`, `cipher`, `auth`, `comp-lzo`, `tun-mtu` and
+> `verify-x509-name`. Anything it recognises but can't reproduce is reported in
+> the import dialog rather than dropped silently, so you find out up front
+> instead of wondering why the connection differs from the official client.
+> Known limits:
+>
+> - **Only the first `remote` is imported.** Add the others as separate nodes if
+>   you want to switch between them.
+> - **`tls-crypt-v2` is refused.** sing-box 1.14.0 panics on it, and a panic
+>   takes the whole core down — every other node with it — so such a profile is
+>   rejected at import instead.
+> - **Only TLS mode.** `static_key` is a pre-TLS OpenVPN dialect with no forward
+>   secrecy, kept upstream only for immutable enterprise servers.
+> - Username/password profiles import fine but the credentials aren't in the
+>   file; fill them in by editing the node. Note that providers often issue a
+>   *separate* OpenVPN username rather than reusing your account password.
+> - **One profile connects at a time.** An `openvpn-client` endpoint dials its
+>   server as soon as the core starts and stays connected whether or not any
+>   traffic uses it — that is how endpoints work, and it holds true even for an
+>   endpoint no selector or route rule references. Emitting every imported
+>   profile would therefore open every VPN session at once and hit the per-account
+>   device limit, which free tiers commonly set to one: the first profile
+>   connects and the rest silently never establish. So only the **selected**
+>   OpenVPN profile is written into the config, and none at all while a
+>   non-OpenVPN node is selected. The consequence is that switching to or away
+>   from an OpenVPN node restarts the core instead of using the instant
+>   selector switch that other protocols get.
 
 > **WireGuard note:** the sing-box WireGuard *outbound* was deprecated in 1.11
 > and **removed in 1.13**, so WireGuard nodes are generated as a top-level
@@ -126,10 +161,17 @@ whitelisted IPC bridge.
 - Base64 / plain-text / URL-safe subscription formats
 - **QR code import** — scan from an image file or from the clipboard
 - Supported protocols: **VMess, VLESS (incl. Reality), Trojan, Shadowsocks,
-  Hysteria2 (incl. obfs + port hopping), TUIC, AnyTLS, ShadowTLS, WireGuard**
-- sing-box **1.13-compatible** config generation (validated against the bundled binary)
+  Hysteria2 (incl. obfs + port hopping), TUIC, AnyTLS, ShadowTLS, WireGuard,
+  OpenVPN**
+- **Core-version-aware config generation**, validated against the bundled binary.
+  Fields added in a newer core are only emitted when the running core actually
+  has them; an unknown core is treated as the oldest supported one, because
+  emitting a field the core doesn't recognise stops it from starting at all
+  while omitting a newer one only loses an optimisation.
 - Start / stop / restart the core with live status
-- Windows system-proxy enable/disable
+- Windows system-proxy enable/disable, with a real bypass list and a WinINET
+  refresh so running apps pick the change up — see
+  [Local and intranet addresses](#local-and-intranet-addresses)
 - **Node groups** — filter the node list by which subscription imported it
 - **LAN sharing** (optional) — let other devices on your network use this proxy
 - **IPv6 leak control** — see [IPv6 handling](#ipv6-handling-tun--split) below
@@ -308,7 +350,7 @@ Copy that folder to the same location on the new PC to bring everything with you
 | Frontend | React 18, TypeScript, Tailwind CSS, Zustand, Recharts |
 | Backend | Node.js, Express, WebSocket (ws) |
 | QR / icons | jsQR, jimp + png-to-ico (build-time icon generation) |
-| Proxy core | sing-box 1.13.18 (upgradeable in-app) |
+| Proxy core | sing-box 1.14.0 (upgradeable in-app) |
 | Build tool | Vite 5 |
 | Desktop | Electron 31 |
 
@@ -406,23 +448,40 @@ providers do exactly that, e.g. Cloudflare `2606:4700:4700::1111`).
 
 | Option | Behaviour |
 |---|---|
-| **Prefer IPv4, allow IPv6** (default) | TUN is dual-stack, so stray IPv6 is captured and proxied. Nothing breaks outright and your real IPv6 address never reaches the network. IPv6-only sites work only if your node supports IPv6. |
-| **Block IPv6** | Dual-stack TUN as well, but a route rule rejects IPv6 instead of proxying it. Equally leak-safe. IPv6-only sites won't load, and the machine keeps a dead IPv6 route, which on an IPv6 network can feel slower. |
-| **IPv4 only** (legacy) | TUN is IPv4-only, so IPv6 is **not** captured. On an IPv6-capable network it exits via your real connection and can expose your actual IP, including via WebRTC. Fallback only. |
+| Option | TUN | DNS to clients | Behaviour |
+|---|---|---|---|
+| **IPv4 only** (default) | IPv4 | `ipv4_only` | No IPv6 route through the tunnel, so Windows has nothing to prefer and apps use IPv4 — which every node can carry. On a network with real IPv6, IPv6 traffic is not captured and exits via your real connection, which can expose your actual IP (including via WebRTC). Same default as mihomo/clash and v2rayN. |
+| **Allow IPv6** | dual-stack | `prefer_ipv4` | AAAA reaches the client, so IPv6 is available, captured by the tunnel and carried through the proxy. Your real IPv6 address never reaches the network. Requires the node's server to have working IPv6 egress; if it doesn't, IPv6 connections stall. |
+| **Block IPv6** | dual-stack | `ipv4_only` | A route rule refuses IPv6 instead of proxying it. Leak-safe, but see the warning below — this is the option most likely to look like a total failure. |
 
-All three serve clients **`ipv4_only`** DNS, so applications are never handed an
-AAAA record and reach for IPv4 — which every node can carry. What differs is only
-how IPv6 that appears **anyway** is treated, meaning hardcoded IPv6 literals that
-bypass DNS entirely.
+> **Why DNS alone cannot keep an app on IPv4.** Withholding AAAA works only for
+> apps that ask *us*. Browsers with built-in DoH — Brave, Chrome's Secure DNS,
+> Firefox — resolve AAAA themselves and never send us the query. If the TUN is
+> dual-stack, Windows reports working IPv6, and per RFC 6724 those apps then
+> prefer IPv6 for nearly everything. On a node without IPv6 egress the result is
+> either stalled connections (**Proxy IPv6**) or connections refused after the
+> handshake was already accepted (**Block IPv6**). Both read as "the app is
+> completely broken" while the config looks perfectly fine.
+>
+> The only thing that reliably stops it is giving the tunnel no IPv6 address at
+> all, so the OS has nothing to prefer. Hence the default.
 
-> **Why no strategy hands out AAAA:** `prefer_ipv4` sounds like the right setting
-> and is a trap. It only *orders* the answers; it still returns AAAA to the
-> client. In TUN mode the OS asks for A and AAAA separately, sing-box answers
-> both, and because the TUN is dual-stack Windows concludes IPv6 works and picks
-> it per RFC 6724. Virtually every connection then leaves over IPv6 — and if the
-> selected node is **IPv4-only**, the far end can't deliver any of it. The node
-> looks broken while the config looks perfectly fine. Withholding AAAA is what
-> actually keeps clients on IPv4.
+> **And why `prefer_ipv4` is right for Allow IPv6 specifically.** Serving
+> `ipv4_only` there was a real bug: the tunnel was dual-stack and ready to carry
+> IPv6, ip.sb still reported no IPv6, and the reason was that every cooperating
+> app had only ever been handed an A record. `prefer_ipv4` fixes that — it orders
+> answers IPv4-first but does hand over AAAA, so IPv6-only destinations become
+> reachable through the tunnel.
+>
+> Expect **Allow IPv6** to keep showing an IPv4 address on a "what's my IP" page.
+> Sites with both records are reached over IPv4 on purpose; that is what "prefer
+> IPv4" means, and it is why this option is safe on nodes with patchy IPv6. Test
+> it against an IPv6-only name such as `ipv6.google.com` instead.
+
+> **If browsing dies in TUN or Split mode, check this setting first.** The
+> signature in the log is an IPv6 destination that reaches
+> `inbound connection to [....]:443` and is followed by no `outbound` line at
+> all — `reject` is silent. Switch to **IPv4 only**.
 
 Regardless of the client-facing strategy, `route.default_domain_resolver` uses
 `prefer_ipv4` so an **IPv6-only proxy node** can still resolve; `ipv4_only`
@@ -430,7 +489,52 @@ alone would make such a node impossible to connect to.
 
 The reject rule is only emitted in TUN/Split mode and only for **global** IPv6:
 it is ordered after the private-address rule so link-local and ULA (`fe80::`,
-`fc00::`) keep working on the LAN.
+`fc00::`) keep working on the LAN. It cannot be moved ahead of the sniff rule to
+refuse IPv6 sooner, because `hijack-dns` matches on the sniffed protocol and
+would stop seeing DNS.
+
+## Local and intranet addresses
+
+Enabling the system proxy writes three registry values, not two: `ProxyEnable`,
+`ProxyServer` and — added in 1.4.0 — `ProxyOverride`, the bypass list. It then
+tells WinINET the settings changed (`INTERNET_OPTION_SETTINGS_CHANGED` +
+`REFRESH`) so applications that are already running re-read them instead of
+holding the previous configuration until restart.
+
+Both were missing before, and the effects were easy to mistake for something
+else:
+
+- With no bypass list, Windows handed **localhost, LAN and intranet requests to
+  the proxy**, which then tried to reach them from the remote node. Local dev
+  servers, a NAS, a router page or a WSL2 service would simply not open.
+- Without the refresh broadcast, toggling the proxy appeared to do nothing in
+  apps that were already open.
+- The bypass list was also whatever a *previously installed* proxy tool had left
+  behind, so behaviour depended on install history. It is now written explicitly
+  every time, and removed again on disable.
+
+The default bypass covers `localhost`, `127.*`, `10.*`, `192.168.*`,
+`172.16.*`–`172.31.*`, `169.254.*`, `*.local` and `<local>`. The `172.16/12`
+range is spelled out per octet deliberately: WSL2, Hyper-V and Docker Desktop put
+their virtual adapters there, and proxying it is what breaks those stacks.
+
+sing-box gets matching treatment, which is what covers clients that never see the
+Windows list — **WSL2 with `http_proxy` pointed at this app is exactly that
+case**, as is any application given an explicit proxy:
+
+- `localhost` is answered from a built-in hosts entry. The core's own `local` DNS
+  server does **not** resolve it — measured against the bundled binary, the query
+  goes upstream and returns `NXDOMAIN`, so the request died even though it was
+  routed correctly. `route.default_domain_resolver` pins outbound resolution and
+  ignores `dns.rules`, so the fix is a `resolve` route action with its own server.
+- `.local`, `.internal`, `.lan`, `.home.arpa` and any single-label name go direct.
+
+One limitation worth knowing: a **single-label hostname** (`http://mypc:3000`)
+cannot be resolved by sing-box at all — Windows finds those over NetBIOS/mDNS,
+which the core does not speak. Routing them direct keeps an internal hostname
+from being handed to a remote proxy, but only the Windows bypass list can
+actually connect them. So in Manual mode, or when pointing another machine at
+this proxy, prefer IPs or fully-qualified names for local targets.
 
 **WebRTC caveat:** in System Proxy and Manual mode the browser sends WebRTC
 STUN over UDP, which the Windows system proxy does not cover, so that traffic

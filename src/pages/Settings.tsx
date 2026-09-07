@@ -12,6 +12,9 @@ export default function Settings() {
   const [isAdmin, setIsAdmin] = React.useState<boolean | null>(null);
   const [reconnecting, setReconnecting] = React.useState(false);
   const [modeError, setModeError] = React.useState<string | null>(null);
+  // True when a config-affecting setting changed while connected but the core is
+  // still running the older config, so the UI must not imply it is in force.
+  const [pendingApply, setPendingApply] = React.useState(false);
 
   React.useEffect(() => {
     let active = true;
@@ -44,6 +47,56 @@ export default function Settings() {
     return problems;
   }, [settings.separatePorts, settings.mixedPort, settings.socksPort, settings.httpPort]);
 
+  /**
+   * Restart the core so the CURRENT settings actually take effect.
+   *
+   * The running core only knows the config it was started with. Changing a
+   * setting here rewrites nothing by itself, so without this the UI and the
+   * core drift apart: a user switched IPv6 handling to a leak-safe mode, the
+   * dropdown showed it as active, and the core kept running the IPv4-only TUN it
+   * had started with — still leaking the real IPv6 address. Anything that alters
+   * the generated config has to either apply immediately or say that it hasn't.
+   */
+  const applyNow = async () => {
+    if (useNodeStore.getState().connectionStatus !== 'connected') {
+      setPendingApply(false);
+      return;
+    }
+    setReconnecting(true);
+    try {
+      const res = await reconnect();
+      if (!res.ok && !res.elevating && res.error) {
+        setModeError(res.error);
+      } else {
+        setModeError(null);
+        setPendingApply(false);
+      }
+    } finally {
+      setReconnecting(false);
+    }
+  };
+
+  /**
+   * For discrete controls (selects, toggles) whose whole purpose is to change
+   * routing behaviour. These apply straight away when connected: a half-applied
+   * privacy or routing setting is actively misleading, and a brief reconnect is
+   * cheaper than the user believing something is in force when it isn't.
+   */
+  const updateAndApply = async (patch: Partial<AppSettings>) => {
+    updateSettings(patch);
+    if (useNodeStore.getState().connectionStatus === 'connected') await applyNow();
+  };
+
+  /**
+   * For free-text and numeric fields (DNS URLs, ports). Restarting the core on
+   * every keystroke would be unusable, so these only flag that a reconnect is
+   * needed and let the user apply when they've finished typing.
+   */
+  const updateAndFlag = (patch: Partial<AppSettings>) => {
+    updateSettings(patch);
+    if (useNodeStore.getState().connectionStatus === 'connected') setPendingApply(true);
+  };
+
   const handleSelectMode = async (mode: ProxyMode) => {
     const prev = settings.proxyMode;
     if (mode === prev) return;
@@ -52,21 +105,7 @@ export default function Settings() {
     // If we're connected, the running core uses the OLD mode's inbounds. A mode
     // change requires a real restart (different inbounds + system-proxy state),
     // so reconnect automatically instead of forcing a manual disconnect.
-    const connected = useNodeStore.getState().connectionStatus === 'connected';
-    if (connected) {
-      setReconnecting(true);
-      try {
-        const res = await reconnect();
-        if (!res.ok && !res.elevating && res.error) {
-          // Surface failures to the user via the banner area.
-          setModeError(res.error);
-        } else {
-          setModeError(null);
-        }
-      } finally {
-        setReconnecting(false);
-      }
-    }
+    if (useNodeStore.getState().connectionStatus === 'connected') await applyNow();
   };
 
   return (
@@ -112,11 +151,22 @@ export default function Settings() {
         </div>
 
         {reconnecting && (
-          <p className="text-[11px] text-primary-400">Applying mode change — reconnecting…</p>
+          <p className="text-[11px] text-primary-400">Applying settings — reconnecting…</p>
         )}
         {modeError && (
           <div className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2">
             <p className="text-[11px] text-red-300">{modeError}</p>
+          </div>
+        )}
+        {pendingApply && !reconnecting && (
+          <div className="rounded-lg border border-yellow-500/40 bg-yellow-500/10 px-3 py-2 flex items-center justify-between gap-3">
+            <p className="text-[11px] text-yellow-300">
+              The running connection is still using the previous settings. Reconnect to apply your
+              changes.
+            </p>
+            <button onClick={applyNow} className="btn-secondary text-[11px] px-2 py-1 shrink-0">
+              Apply now
+            </button>
           </div>
         )}
 
@@ -156,7 +206,7 @@ export default function Settings() {
           <input
             type="number"
             value={settings.mixedPort}
-            onChange={(e) => updateSettings({ mixedPort: parseInt(e.target.value) || 7890 })}
+            onChange={(e) => updateAndFlag({ mixedPort: parseInt(e.target.value) || 7890 })}
             className="input-field"
           />
           <p className="text-[11px] text-surface-500 mt-1">
@@ -169,7 +219,7 @@ export default function Settings() {
           <input
             type="checkbox"
             checked={!!settings.separatePorts}
-            onChange={(e) => updateSettings({ separatePorts: e.target.checked })}
+            onChange={(e) => updateAndApply({ separatePorts: e.target.checked })}
             className="mt-0.5"
           />
           <span className="text-xs text-surface-300">
@@ -190,7 +240,7 @@ export default function Settings() {
                 <input
                   type="number"
                   value={settings.socksPort}
-                  onChange={(e) => updateSettings({ socksPort: parseInt(e.target.value) || 1080 })}
+                  onChange={(e) => updateAndFlag({ socksPort: parseInt(e.target.value) || 1080 })}
                   className="input-field"
                 />
               </div>
@@ -199,7 +249,7 @@ export default function Settings() {
                 <input
                   type="number"
                   value={settings.httpPort}
-                  onChange={(e) => updateSettings({ httpPort: parseInt(e.target.value) || 8080 })}
+                  onChange={(e) => updateAndFlag({ httpPort: parseInt(e.target.value) || 8080 })}
                   className="input-field"
                 />
               </div>
@@ -223,38 +273,56 @@ export default function Settings() {
           <h3 className="text-sm font-medium text-surface-200">IPv6 Handling (TUN / Split)</h3>
         </div>
         <select
-          value={settings.ipv6Strategy || 'prefer-ipv4'}
-          onChange={(e) => updateSettings({ ipv6Strategy: e.target.value as AppSettings['ipv6Strategy'] })}
+          value={settings.ipv6Strategy || 'block'}
+          onChange={(e) => updateAndApply({ ipv6Strategy: e.target.value as AppSettings['ipv6Strategy'] })}
           className="input-field"
         >
-          <option value="prefer-ipv4">Prefer IPv4, allow IPv6 — no leak (recommended)</option>
-          <option value="block">Block IPv6 — no leak, forces IPv6 fully off</option>
-          <option value="ipv4-only">IPv4 only (legacy) — IPv6 bypasses the tunnel</option>
+          <option value="block">No IPv6 leak — IPv6 sent over IPv4 (recommended)</option>
+          <option value="prefer-ipv4">Allow IPv6 — tunneled, IPv4 still preferred</option>
+          <option value="ipv4-only">IPv4 only — most compatible, but IPv6 leaks</option>
         </select>
 
         <div className="text-[11px] text-surface-500 space-y-1">
-          {settings.ipv6Strategy === 'block' && (
-            <p>
-              Apps are never given IPv6 addresses, so they use IPv4 and never stall. Any app that
-              dials a hardcoded IPv6 address is captured by the tunnel and refused, so your real
-              IPv6 address can't leak. IPv6-only sites won't load, and the machine keeps a
-              dead IPv6 route — on an IPv6 network that can make things feel slower.
-            </p>
-          )}
-          {(settings.ipv6Strategy || 'prefer-ipv4') === 'prefer-ipv4' && (
-            <p>
-              Apps are given IPv4 addresses only, so they use IPv4 — which every node can carry.
-              Any IPv6 that appears anyway (an app dialing a hardcoded IPv6 address) is captured by
-              the tunnel and sent through the proxy, so your real IPv6 address still can't leak.
-              IPv6-only sites work <em>only</em> if your node supports IPv6.
-            </p>
-          )}
           {settings.ipv6Strategy === 'ipv4-only' && (
             <p className="text-yellow-300">
-              IPv6 is not captured by the tunnel. On an IPv6-capable network it goes out over your
-              real connection, which can expose your actual IP address (including via WebRTC).
-              Only use this if the other options cause problems.
+              The tunnel has no IPv6 address, so Windows has no IPv6 route to prefer and apps use
+              IPv4 — which every node can carry. The catch: IPv6 isn't captured at all, so on a
+              network with real IPv6 it goes out over your real connection and a site like ip.sb
+              will show your actual IPv6 address. Use this only if the dual-stack tunnel breaks
+              WSL2, Docker or Hyper-V networking for you.
             </p>
+          )}
+          {settings.ipv6Strategy === 'prefer-ipv4' && (
+            <>
+              <p>
+                The tunnel is dual-stack and apps are given IPv6 addresses, so IPv6 is available and
+                is carried through the proxy — your real IPv6 address can't leak. Your node's server
+                needs working IPv6 of its own; if it doesn't, IPv6 connections stall and you should
+                use <strong>IPv4 only</strong> instead.
+              </p>
+              <p className="text-surface-600">
+                IPv4 is still preferred for sites that have both, so a "what's my IP" page like ip.sb
+                will normally keep showing your IPv4 exit — that's expected, not a failure. To check
+                IPv6 really works, open an IPv6-only address such as <code>ipv6.google.com</code> or
+                use test-ipv6.com.
+              </p>
+            </>
+          )}
+          {(settings.ipv6Strategy || 'block') === 'block' && (
+            <>
+              <p>
+                The tunnel is dual-stack, so IPv6 is captured instead of escaping over your real
+                connection — a "what's my IP" page like ip.sb will show only your node's address.
+                When an app reaches for an IPv6 address anyway, the request is re-sent to the site's
+                IPv4 address through the proxy, so it still loads and works with IPv4-only nodes.
+              </p>
+              <p className="text-surface-600">
+                Connections that can't be redirected are refused: an IPv6 literal with no hostname
+                to look up, or a site that is genuinely IPv6-only. Both are rare, and apps fall back
+                to IPv4. If the dual-stack tunnel interferes with WSL2, Docker or Hyper-V, switch to{' '}
+                <strong>IPv4 only</strong> and accept the leak.
+              </p>
+            </>
           )}
           <p className="text-surface-600">
             Note: in System Proxy and Manual mode the browser's WebRTC sends UDP outside the proxy
@@ -263,21 +331,49 @@ export default function Settings() {
           </p>
         </div>
 
-        {/* Escape hatch for virtual network stacks that share the host's. */}
+        {/* TCP/IP stack. Host-dependent, so it's a choice rather than a default
+            we impose — see AppSettings.tunStack. */}
+        <div className="pt-2 border-t border-surface-700/30 mt-1 space-y-2">
+          <div>
+            <label className="text-xs text-surface-300 block mb-1">Network stack (TUN / Split)</label>
+            <select
+              value={settings.tunStack || 'mixed'}
+              onChange={(e) => updateAndApply({ tunStack: e.target.value as AppSettings['tunStack'] })}
+              className="input-field"
+            >
+              <option value="mixed">Mixed — system TCP + gVisor UDP (recommended)</option>
+              <option value="system">System — fastest for downloads and video</option>
+              <option value="gvisor">gVisor — userspace, best UDP compatibility</option>
+            </select>
+          </div>
+          <p className="text-[11px] text-surface-500">
+            {(settings.tunStack || 'mixed') === 'mixed' &&
+              'The core\'s own default: Windows handles TCP so transfers stay fast, while UDP goes through gVisor to keep games and WebRTC working.'}
+            {settings.tunStack === 'system' &&
+              'Windows handles both TCP and UDP. The lightest option and what v2rayN ships — try this first if video or large downloads are slow in TUN mode.'}
+            {settings.tunStack === 'gvisor' &&
+              'Everything is reassembled in userspace. Highest CPU cost and slowest for bulk transfers; only worth it if a UDP-heavy app misbehaves on the other two.'}
+          </p>
+        </div>
+
+        {/* Escape hatch for virtual network stacks that share the host's.
+            Replaces the old "Strict route" toggle — see
+            AppSettings.tunBypassLocalNetworks for why that one had to go. */}
         <label className="flex items-start gap-2 cursor-pointer pt-1 border-t border-surface-700/30 mt-1">
           <input
             type="checkbox"
-            checked={settings.tunStrictRoute !== false}
-            onChange={(e) => updateSettings({ tunStrictRoute: e.target.checked })}
+            checked={settings.tunBypassLocalNetworks === true}
+            onChange={(e) => updateAndApply({ tunBypassLocalNetworks: e.target.checked })}
             className="mt-0.5"
           />
           <span className="text-xs text-surface-300">
-            Strict route (recommended)
+            Keep local networks off the tunnel
             <span className="block text-[11px] text-surface-500">
-              Forces every packet through the tunnel so nothing slips past. Turn it off if WSL2 in
-              mirrored networking mode, Docker or Hyper-V start losing their connection while TUN or
-              Split is active — those share the Windows network stack and the strict rules can drop
-              their traffic, which looks like the proxy randomly breaking.
+              Turn this on if WSL2 in mirrored networking mode, Docker or Hyper-V lose their
+              connection while TUN or Split is active. Those run on private network bridges, and
+              pulling their traffic into the tunnel is what breaks them. This leaves the private
+              ranges (10.x, 172.16–31.x, 192.168.x) on your normal connection instead. They were
+              never sent through the proxy anyway, so nothing else changes.
             </span>
           </span>
         </label>
@@ -301,7 +397,7 @@ export default function Settings() {
           <input
             type="checkbox"
             checked={!!settings.allowLan}
-            onChange={(e) => updateSettings({ allowLan: e.target.checked })}
+            onChange={(e) => updateAndApply({ allowLan: e.target.checked })}
             className="w-4 h-4 rounded shrink-0"
           />
         </div>
@@ -339,7 +435,7 @@ export default function Settings() {
           <input
             type="text"
             value={settings.remoteDns}
-            onChange={(e) => updateSettings({ remoteDns: e.target.value })}
+            onChange={(e) => updateAndFlag({ remoteDns: e.target.value })}
             placeholder="https://dns.google/dns-query"
             className="input-field font-mono text-xs"
           />
@@ -349,7 +445,7 @@ export default function Settings() {
           <input
             type="text"
             value={settings.directDns}
-            onChange={(e) => updateSettings({ directDns: e.target.value })}
+            onChange={(e) => updateAndFlag({ directDns: e.target.value })}
             placeholder="https://dns.alidns.com/dns-query"
             className="input-field font-mono text-xs"
           />
@@ -367,7 +463,7 @@ export default function Settings() {
             type="checkbox"
             id="bypass-china"
             checked={settings.bypassChina}
-            onChange={(e) => updateSettings({ bypassChina: e.target.checked })}
+            onChange={(e) => updateAndApply({ bypassChina: e.target.checked })}
             className="w-4 h-4 rounded"
           />
           <label htmlFor="bypass-china" className="text-sm text-surface-300">
@@ -378,7 +474,7 @@ export default function Settings() {
           <label className="text-xs text-surface-400 mb-1 block">Log Level</label>
           <select
             value={settings.logLevel}
-            onChange={(e) => updateSettings({ logLevel: e.target.value as LogLevel })}
+            onChange={(e) => updateAndApply({ logLevel: e.target.value as LogLevel })}
             className="input-field"
           >
             <option value="trace">Trace</option>

@@ -5,6 +5,11 @@ import { tagForIndex } from './outbound-tags';
 export interface ConnectResult {
   ok: boolean;
   error?: string;
+  /**
+   * Set when the connection succeeded but something could not be verified.
+   * Distinct from `error`, which means the connection is not usable.
+   */
+  warning?: string;
   /** True when the app is relaunching as admin (caller should stop). */
   elevating?: boolean;
 }
@@ -83,12 +88,33 @@ export async function connect(): Promise<ConnectResult> {
   // selector's selection explicitly via the Clash API right after start so
   // the UI's current choice always wins over any stale cached selection.
   const tag = tagForIndex(nodes, selectedIndex);
+  let warning: string | undefined;
   if (tag) {
-    await forceSelectWithRetry('proxy', tag);
+    const outcome = await forceSelect('proxy', tag);
+    if (!outcome.ok) {
+      if (outcome.confirmedWrong) {
+        // The core told us it is on a different node. That IS a routing problem
+        // and saying "connected" would be a lie.
+        return {
+          ok: false,
+          error:
+            `Could not switch to "${tag}": ${outcome.reason}. ` +
+            'Traffic would not go through the node you picked.',
+        };
+      }
+      // We could not reach the Clash API to confirm. The config was generated
+      // with this node as the selector default, so it is probably active — we
+      // just cannot prove it. Warn rather than blocking a working connection.
+      warning =
+        `Connected, but could not confirm the active node with the core (${outcome.reason}). ` +
+        `The config selects "${tag}"; check the Logs page if traffic looks wrong.`;
+    }
     if (settings.proxyMode === 'split' && Array.isArray(settings.splitRules)) {
       for (const rule of settings.splitRules) {
         if (rule.enabled && rule.outbound) {
-          await forceSelectWithRetry(rule.name, rule.outbound);
+          // Best-effort: the API is known-reachable by now if the call above
+          // succeeded, and a per-rule failure should not fail the connection.
+          await forceSelect(rule.name, rule.outbound, 2000);
         }
       }
     }
@@ -97,22 +123,90 @@ export async function connect(): Promise<ConnectResult> {
   if (settings.proxyMode === 'system') {
     await window.api.systemProxy.enable('127.0.0.1', settings.mixedPort);
   }
-  return { ok: true };
+  return { ok: true, warning };
 }
 
 /**
- * Call the Clash API select with a couple of retries — the API listener can
- * take a brief moment to come up right after sing-box reports "started".
+ * Outcome of trying to point a selector at an outbound.
+ *
+ * The distinction between the two failure kinds is the important part.
+ * "Confirmed wrong" means the core told us it is using a different node, which
+ * is a real routing problem worth blocking on. "Unverified" means we could not
+ * reach the Clash API to ask — the selection may well be correct, and claiming
+ * otherwise is a false alarm.
  */
-async function forceSelectWithRetry(selector: string, outbound: string, attempts = 5): Promise<void> {
-  for (let i = 0; i < attempts; i++) {
+type SelectOutcome =
+  | { ok: true }
+  | { ok: false; confirmedWrong: boolean; reason: string };
+
+/**
+ * How long to wait for the Clash API listener after the core reports started.
+ *
+ * Split mode needs a generous budget. Its config carries remote `rule_set`
+ * entries that sing-box downloads from jsDelivr during startup, and the Clash
+ * API only begins listening once that finishes — so the listener can be many
+ * seconds late. The original 1.5s here produced a confident but wrong
+ * "traffic would not go through the node you picked" in Split mode while the
+ * log showed traffic correctly using the selected node the whole time.
+ */
+const CLASH_API_READY_TIMEOUT_MS = 15000;
+const CLASH_API_POLL_INTERVAL_MS = 400;
+
+/**
+ * Point `selector` at `outbound` and CONFIRM it took effect.
+ *
+ * The confirmation matters more than the retry. A successful PUT only says the
+ * request was accepted; it does not prove the selector moved. sing-box restores
+ * every selector's cached choice on start and that overrides the config's
+ * `default`, so a selection that silently fails leaves the core routing through
+ * a previously-used node while the UI happily shows the one the user picked.
+ * That was observed in the field: the config carried `default: "SP1"`, the user
+ * had another node highlighted, and every connection went out through a stale
+ * `24 日本`. So read the active outbound back and only report success when it is
+ * the tag we asked for.
+ *
+ * `budgetMs` bounds how long to keep trying while the API is still coming up.
+ * Callers that have a cheap fallback (switchNode, which can just restart) pass
+ * a small budget; the initial connect passes the full readiness timeout.
+ */
+async function forceSelect(
+  selector: string,
+  outbound: string,
+  budgetMs = CLASH_API_READY_TIMEOUT_MS
+): Promise<SelectOutcome> {
+  const deadline = Date.now() + budgetMs;
+  let unreachableReason = 'the core did not respond';
+
+  for (;;) {
     try {
       const res = await window.api.singbox.select(selector, outbound);
-      if (res && res.success) return;
-    } catch {
-      /* ignore and retry */
+      if (res && res.success) {
+        // Older builds of the preload bridge may not expose the read-back. In
+        // that case accept the PUT rather than failing a working switch.
+        if (!window.api.singbox.getSelection) return { ok: true };
+        const active = await window.api.singbox.getSelection(selector);
+        if (active && active.success) {
+          if (active.now === outbound) return { ok: true };
+          // The API answered and named a different outbound. That is a genuine
+          // mismatch, not a timing artefact, so stop and report it.
+          return {
+            ok: false,
+            confirmedWrong: true,
+            reason: `the core is using "${active.now ?? 'unknown'}" instead of "${outbound}"`,
+          };
+        }
+        unreachableReason = active?.error || 'could not read the active outbound back';
+      } else if (res && res.error) {
+        unreachableReason = res.error;
+      }
+    } catch (err: any) {
+      unreachableReason = err?.message || 'the core did not respond';
     }
-    await new Promise((r) => setTimeout(r, 300));
+
+    if (Date.now() >= deadline) {
+      return { ok: false, confirmedWrong: false, reason: unreachableReason };
+    }
+    await new Promise((r) => setTimeout(r, CLASH_API_POLL_INTERVAL_MS));
   }
 }
 
@@ -129,7 +223,12 @@ async function forceSelectWithRetry(selector: string, outbound: string, attempts
  * displayed node is worse than a brief reconnect.
  */
 export async function switchNode(index: number): Promise<ConnectResult> {
-  const { nodes, connectionStatus, setSelectedIndex } = useNodeStore.getState();
+  const {
+    nodes,
+    selectedIndex: previousIndex,
+    connectionStatus,
+    setSelectedIndex,
+  } = useNodeStore.getState();
   if (index < 0 || index >= nodes.length) return { ok: false, error: 'No such node' };
 
   setSelectedIndex(index);
@@ -138,13 +237,28 @@ export async function switchNode(index: number): Promise<ConnectResult> {
   const { settings } = useSettingsStore.getState();
   const tag = tagForIndex(nodes, index);
 
-  if (tag && window.api.singbox.select) {
-    try {
-      const res = await window.api.singbox.select('proxy', tag);
-      if (res && res.success) return { ok: true };
-    } catch {
-      /* fall through to a restart */
-    }
+  // OpenVPN cannot be switched live, in either direction. Its endpoint dials at
+  // startup and holds the session for as long as it is in the config, so only
+  // the selected profile is emitted at all (see nodeInactiveReason in the config
+  // generator). Switching TO one therefore can't work — the tag isn't in the
+  // running config — and switching AWAY from one via the selector would leave
+  // its VPN session established and counting against the account's device
+  // limit. Both cases need the config itself to change, so skip the live switch.
+  const involvesOpenvpn =
+    nodes[index]?.type === 'openvpn' ||
+    (previousIndex >= 0 &&
+      previousIndex < nodes.length &&
+      nodes[previousIndex]?.type === 'openvpn');
+
+  // One attempt at the live switch, but verified: an accepted PUT that did not
+  // actually move the selector used to leave traffic on the previous node with
+  // the UI showing the new one. If it cannot be confirmed, fall through to the
+  // restart below rather than reporting a switch that did not happen.
+  if (tag && !involvesOpenvpn) {
+    // Short budget: the core is already running, so the API should answer at
+    // once. If it doesn't, the restart below is the cheaper path.
+    const outcome = await forceSelect('proxy', tag, 1200);
+    if (outcome.ok) return { ok: true };
   }
 
   try {
@@ -154,7 +268,18 @@ export async function switchNode(index: number): Promise<ConnectResult> {
     if (result && result.success === false) {
       return { ok: false, error: result.error || 'Could not switch node' };
     }
-    if (tag) await forceSelectWithRetry('proxy', tag);
+    if (tag) {
+      const outcome = await forceSelect('proxy', tag);
+      if (!outcome.ok && outcome.confirmedWrong) {
+        return { ok: false, error: `Could not switch to "${tag}": ${outcome.reason}.` };
+      }
+      if (!outcome.ok) {
+        return {
+          ok: true,
+          warning: `Switched to "${tag}", but could not confirm it with the core (${outcome.reason}).`,
+        };
+      }
+    }
     return { ok: true };
   } catch (err: any) {
     return { ok: false, error: err?.message || 'Could not switch node' };

@@ -142,10 +142,11 @@ function clashProxyToNode(proxy: any): ProxyNode | null {
   }
 
   if (type === 'hysteria2') {
-    // Clash/Mihomo: `obfs: salamander` + `obfs-password`.
+    // Clash/Mihomo: `obfs: salamander` (or `gecko`, sing-box 1.14+) plus
+    // `obfs-password`.
     const obfs = String(proxy.obfs || '').toLowerCase();
-    if (obfs === 'salamander') {
-      node.obfsType = 'salamander';
+    if (obfs === 'salamander' || obfs === 'gecko') {
+      node.obfsType = obfs;
       const op = proxy['obfs-password'] || proxy['obfs_password'];
       if (op) node.obfsPassword = String(op);
     }

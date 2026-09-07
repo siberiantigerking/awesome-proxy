@@ -9,6 +9,7 @@ import { useSettingsStore } from '../store/settingsStore';
 import { parseProxyLink, parseProxyLinks, getCountryFlag, getProtocolColor } from '../services/node-parser';
 import { switchNode } from '../services/connection';
 import { buildProxyLink } from '../services/node-link';
+import { parseOvpnConfig } from '../services/ovpn-parser';
 import {
   runNodeTest,
   isDisruptive,
@@ -20,6 +21,7 @@ import {
   type TestContext,
   type TestResult,
 } from '../services/node-tests';
+import { useConfirm } from '../components/ConfirmDialog';
 import type { NodeTestKind, ProxyNode, ProxyProtocol } from '../types';
 
 const TEST_KINDS: NodeTestKind[] = ['tcp', 'real', 'udp', 'speed'];
@@ -62,6 +64,7 @@ export default function NodeManager() {
   // only one that works while disconnected and never touches live traffic.
   const [testKind, setTestKind] = useState<NodeTestKind>('tcp');
   const [testError, setTestError] = useState<string | null>(null);
+  const { confirm, confirmDialog } = useConfirm();
   // Set to true to make in-flight test workers stop after their current probe.
   const abortTests = React.useRef(false);
   const isConnected = connectionStatus === 'connected';
@@ -189,13 +192,17 @@ export default function NodeManager() {
 
     if (isDisruptive(testKind)) {
       const seconds = testKind === 'speed' ? 8 : 6;
-      const ok = window.confirm(
-        `${TEST_LABELS[testKind]} runs through the active connection, so it has to switch to each ` +
-          `node in turn — your traffic will follow it while each test runs.\n\n` +
+      // In-app confirm, not window.confirm: the native dialog blocks the whole
+      // renderer and leaves text inputs unable to take focus after it closes.
+      const ok = await confirm({
+        title: TEST_LABELS[testKind],
+        message:
+          `This test runs through the active connection, so it has to switch to each node in ` +
+          `turn — your traffic will follow it while each test runs.\n\n` +
           `${targets.length} node(s) x about ${seconds}s = roughly ` +
-          `${Math.ceil((targets.length * seconds) / 60)} minute(s) of interrupted browsing.\n\n` +
-          `Continue?`
-      );
+          `${Math.ceil((targets.length * seconds) / 60)} minute(s) of interrupted browsing.`,
+        confirmLabel: 'Run test',
+      });
       if (!ok) return;
     }
 
@@ -613,6 +620,8 @@ export default function NodeManager() {
           }}
         />
       )}
+
+      {confirmDialog}
     </div>
   );
 }
@@ -622,49 +631,78 @@ export default function NodeManager() {
 function ImportDialog({ onClose, onImport }: { onClose: () => void; onImport: (nodes: ProxyNode[]) => void }) {
   const [text, setText] = useState('');
   const [preview, setPreview] = useState<ProxyNode[]>([]);
-  const [qrStatus, setQrStatus] = useState<string | null>(null);
+  // Shared status line for every import path in this dialog (links, QR, .ovpn).
+  const [status, setStatus] = useState<string | null>(null);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
+  const ovpnInputRef = React.useRef<HTMLInputElement>(null);
 
   const handleParse = () => {
     const nodes = parseProxyLinks(text);
     setPreview(nodes);
-    if (nodes.length === 0) setQrStatus('No valid proxy links found in the text.');
+    if (nodes.length === 0) setStatus('No valid proxy links found in the text.');
   };
 
   // Decode a QR code and feed the decoded link(s) into the parse flow.
   const ingestDecoded = (decoded: string | null, sourceLabel: string) => {
     if (!decoded) {
-      setQrStatus(`No QR code found in the ${sourceLabel}.`);
+      setStatus(`No QR code found in the ${sourceLabel}.`);
       return;
     }
     const nodes = parseProxyLinks(decoded);
     if (nodes.length === 0) {
-      setQrStatus('QR decoded, but it did not contain a valid proxy link.');
+      setStatus('QR decoded, but it did not contain a valid proxy link.');
       return;
     }
     // Append decoded text so the user can see/edit it, and show the preview.
     setText((prev) => (prev ? prev + '\n' + decoded : decoded));
     setPreview((prev) => [...prev, ...nodes]);
-    setQrStatus(`Found ${nodes.length} node${nodes.length !== 1 ? 's' : ''} from QR (${sourceLabel}).`);
+    setStatus(`Found ${nodes.length} node${nodes.length !== 1 ? 's' : ''} from QR (${sourceLabel}).`);
   };
 
   const handleScanFile = async (file: File) => {
-    setQrStatus('Scanning image...');
+    setStatus('Scanning image...');
     try {
       const { decodeQrFromFile } = await import('../services/qr-scanner');
       ingestDecoded(await decodeQrFromFile(file), 'image');
     } catch (err: any) {
-      setQrStatus(err?.message || 'Failed to scan image.');
+      setStatus(err?.message || 'Failed to scan image.');
+    }
+  };
+
+  /**
+   * Import an OpenVPN profile. Read in the renderer via FileReader rather than
+   * through the Electron file API so the same code path works in web mode.
+   *
+   * Anything the profile asked for that we can't reproduce is surfaced rather
+   * than dropped silently — an OpenVPN profile can carry a lot that sing-box
+   * has no equivalent for, and quietly ignoring it would show up later as
+   * "connects but behaves differently from the official client".
+   */
+  const handleOvpnFile = async (file: File) => {
+    setStatus(`Reading ${file.name}...`);
+    try {
+      const text = await file.text();
+      const { node, errors, warnings } = parseOvpnConfig(text, file.name);
+      if (!node) {
+        setStatus(`Could not import ${file.name}:\n` + errors.map((e) => '• ' + e).join('\n'));
+        return;
+      }
+      setPreview((prev) => [...prev, node]);
+      const lines = [`Imported "${node.name}" (${node.server}:${node.port}, ${node.ovpnNetwork}).`];
+      if (warnings.length) lines.push('Note:', ...warnings.map((w) => '• ' + w));
+      setStatus(lines.join('\n'));
+    } catch (err: any) {
+      setStatus(err?.message || `Failed to read ${file.name}.`);
     }
   };
 
   const handleScanClipboard = async () => {
-    setQrStatus('Reading clipboard...');
+    setStatus('Reading clipboard...');
     try {
       const { decodeQrFromClipboard } = await import('../services/qr-scanner');
       ingestDecoded(await decodeQrFromClipboard(), 'clipboard');
     } catch (err: any) {
-      setQrStatus(err?.message || 'Failed to read clipboard image.');
+      setStatus(err?.message || 'Failed to read clipboard image.');
     }
   };
 
@@ -674,14 +712,15 @@ function ImportDialog({ onClose, onImport }: { onClose: () => void; onImport: (n
         <div className="p-4 border-b border-surface-700">
           <h3 className="text-base font-semibold">Import Proxy Nodes</h3>
           <p className="text-xs text-surface-500 mt-1">
-            Paste links (vmess://, vless://, trojan://, ss://, hysteria2://, tuic://, anytls://), a base64 subscription, or scan a QR code
+            Paste links (vmess://, vless://, trojan://, ss://, hysteria2://, tuic://, anytls://), a base64
+            subscription, scan a QR code, or import an OpenVPN .ovpn profile
           </p>
         </div>
 
         <div className="p-4 flex-1 overflow-y-auto">
           <textarea
             value={text}
-            onChange={(e) => { setText(e.target.value); setPreview([]); setQrStatus(null); }}
+            onChange={(e) => { setText(e.target.value); setPreview([]); setStatus(null); }}
             placeholder="vmess://eyJ2IjoyLCJwcyI6Ii4uLiJ9&#10;vless://uuid@server:port&#10;trojan://password@server:port&#10;..."
             className="input-field h-32 resize-none font-mono text-xs"
           />
@@ -709,12 +748,34 @@ function ImportDialog({ onClose, onImport }: { onClose: () => void; onImport: (n
             </button>
           </div>
 
+          {/* OpenVPN has no share-link format, so the file IS the import path. */}
+          <div className="flex items-center gap-2 mt-2">
+            <input
+              ref={ovpnInputRef}
+              type="file"
+              accept=".ovpn,.conf,text/plain"
+              className="hidden"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) handleOvpnFile(f);
+                e.target.value = '';
+              }}
+            />
+            <button
+              onClick={() => ovpnInputRef.current?.click()}
+              className="btn-secondary flex-1 flex items-center justify-center gap-1.5"
+            >
+              <ExternalLink size={14} />
+              Import .ovpn File
+            </button>
+          </div>
+
           <button onClick={handleParse} className="btn-secondary w-full mt-2">
             Parse Links
           </button>
 
-          {qrStatus && (
-            <p className="text-xs text-surface-400 mt-2">{qrStatus}</p>
+          {status && (
+            <p className="text-xs text-surface-400 mt-2 whitespace-pre-line">{status}</p>
           )}
 
           {preview.length > 0 && (
@@ -786,6 +847,7 @@ function NodeFormDialog({
     { value: 'anytls', label: 'AnyTLS' },
     { value: 'shadowtls', label: 'ShadowTLS (+ Shadowsocks)' },
     { value: 'wireguard', label: 'WireGuard' },
+    { value: 'openvpn', label: 'OpenVPN (import a .ovpn file)' },
   ];
 
   // Per-protocol required-field validation so users get a clear reason a node
@@ -817,6 +879,12 @@ function NodeFormDialog({
       if (!form.privateKey?.trim()) return 'WireGuard requires a private key.';
       if (!form.peerPublicKey?.trim()) return 'WireGuard requires the peer public key.';
       if (!form.localAddress?.length) return 'WireGuard requires a local address (e.g. 10.0.0.2/32).';
+    }
+    // OpenVPN needs a CA and often client certificates, which are PEM blobs
+    // nobody types by hand — so refuse here rather than let the user save a node
+    // that could only ever be skipped at connect time.
+    if (form.type === 'openvpn' && !form.ovpnCa?.trim()) {
+      return 'OpenVPN nodes are created by importing a profile: Import → Import .ovpn File.';
     }
     return null;
   })();
@@ -922,6 +990,7 @@ function NodeFormDialog({
                   >
                     <option value="">none</option>
                     <option value="salamander">salamander</option>
+                    <option value="gecko">gecko (needs core 1.14+)</option>
                   </select>
                 </div>
                 <div>
@@ -936,6 +1005,25 @@ function NodeFormDialog({
                   />
                 </div>
               </div>
+              {/* Escape hatch for the one case where 1.14's Chrome QUIC
+                  parroting makes a previously working node fail. */}
+              <label className="flex items-start gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={!!form.disableChromeParrot}
+                  onChange={(e) => update('disableChromeParrot', e.target.checked)}
+                  className="mt-0.5"
+                />
+                <span className="text-xs text-surface-300">
+                  Disable Chrome QUIC fingerprint parroting
+                  <span className="block text-[11px] text-surface-500">
+                    Core 1.14+ imitates Chrome's QUIC handshake by default, which makes the traffic
+                    harder to identify. Tick this only if the node stopped working after a core
+                    upgrade: Chrome doesn't advertise Ed25519, so a server using an Ed25519
+                    certificate fails the handshake.
+                  </span>
+                </span>
+              </label>
               <div>
                 <label className="text-xs text-surface-400 mb-1 block">
                   Port Hopping Range (overrides Port)
@@ -1024,6 +1112,82 @@ function NodeFormDialog({
                 </select>
               </div>
             </div>
+          )}
+
+          {/* OpenVPN: only the parts a user can meaningfully change. The
+              certificates come from the profile and are shown as a summary. */}
+          {form.type === 'openvpn' && (
+            <>
+              <p className="text-[11px] text-surface-500">
+                Certificates and keys come from the imported .ovpn profile and aren't edited here —
+                re-import the file to change them. Many profiles also need a username and password.
+              </p>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs text-surface-400 mb-1 block">Username</label>
+                  <input
+                    type="text"
+                    value={form.username || ''}
+                    onChange={(e) => update('username', e.target.value)}
+                    placeholder="only if the profile requires it"
+                    className="input-field"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-surface-400 mb-1 block">Password</label>
+                  <input
+                    type="text"
+                    value={form.password || ''}
+                    onChange={(e) => update('password', e.target.value)}
+                    placeholder="only if the profile requires it"
+                    className="input-field"
+                  />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs text-surface-400 mb-1 block">Transport</label>
+                  <select
+                    value={form.ovpnNetwork || 'udp'}
+                    onChange={(e) => update('ovpnNetwork', e.target.value)}
+                    className="input-field"
+                  >
+                    <option value="udp">UDP</option>
+                    <option value="tcp">TCP</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs text-surface-400 mb-1 block">MTU</label>
+                  <input
+                    type="number"
+                    value={form.mtu || ''}
+                    onChange={(e) => update('mtu', parseInt(e.target.value) || undefined)}
+                    placeholder="1500"
+                    className="input-field"
+                  />
+                </div>
+              </div>
+              <div className="rounded-lg border border-surface-700/40 bg-surface-900/40 px-3 py-2 text-[11px] text-surface-400 space-y-0.5">
+                <p>From the profile:</p>
+                <p>• CA certificate: {form.ovpnCa ? 'present' : <span className="text-red-400">missing</span>}</p>
+                <p>
+                  • Client certificate:{' '}
+                  {form.ovpnClientCert && form.ovpnClientKey ? 'present' : 'not used'}
+                </p>
+                <p>
+                  • Control channel:{' '}
+                  {form.ovpnControlWrapType
+                    ? form.ovpnControlWrapType.replace('_', '-') +
+                      (form.ovpnControlWrapDirection ? ` (key-direction ${form.ovpnControlWrapDirection})` : '')
+                    : 'none'}
+                </p>
+                {form.ovpnDataCiphers?.length ? <p>• Data ciphers: {form.ovpnDataCiphers.join(', ')}</p> : null}
+                {form.ovpnAuth ? <p>• Auth digest: {form.ovpnAuth}</p> : null}
+                {form.ovpnCompressionLzo ? (
+                  <p className="text-yellow-300">• comp-lzo: {form.ovpnCompressionLzo} (compression weakens confidentiality)</p>
+                ) : null}
+              </div>
+            </>
           )}
 
           {/* ShadowTLS: outer handshake settings + inner Shadowsocks credentials */}

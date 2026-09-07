@@ -1,29 +1,71 @@
 import React, { useState } from 'react';
-import { Plus, Trash2, RefreshCw, ExternalLink, Clock, Package, AlertCircle } from '../components/Icons';
+import { Plus, Trash2, RefreshCw, ExternalLink, Clock, Package, AlertCircle, Edit3 } from '../components/Icons';
 import { useSubscriptionStore } from '../store/subscriptionStore';
 import { useNodeStore } from '../store/nodeStore';
 import { fetchSubscription, updateAllSubscriptions } from '../services/subscription-fetcher';
+import { resetSubscriptionBackoff } from '../services/auto-update';
+import { useConfirm } from '../components/ConfirmDialog';
 import type { Subscription } from '../types';
 
 export default function SubscriptionManager() {
   const { subscriptions, addSubscription, updateSubscription, removeSubscription, saveToStore } = useSubscriptionStore();
   const { nodes, setNodes, removeNodesBySubscription } = useNodeStore();
-  const [showAddDialog, setShowAddDialog] = useState(false);
+  // null = closed, 'add' = new subscription, otherwise the subscription being edited.
+  const [dialog, setDialog] = useState<'add' | Subscription | null>(null);
   const [updatingId, setUpdatingId] = useState<string | null>(null);
   const [updatingAll, setUpdatingAll] = useState(false);
   const [updateError, setUpdateError] = useState<string | null>(null);
+  const { confirm, confirmDialog } = useConfirm();
 
   // Remove a subscription and all proxy nodes that were imported from it.
-  const handleRemoveSubscription = (sub: Subscription) => {
+  //
+  // Uses the in-app confirm rather than window.confirm: the native dialog blocks
+  // the renderer and leaves text inputs unable to take focus afterwards, which is
+  // what made the Add Subscription name field impossible to type in after a
+  // delete. See components/ConfirmDialog.
+  const handleRemoveSubscription = async (sub: Subscription) => {
     const count = nodes.filter((n) => n.subscriptionId === sub.id).length;
-    const ok = window.confirm(
-      count > 0
-        ? `Delete subscription "${sub.name}" and its ${count} node${count !== 1 ? 's' : ''}?`
-        : `Delete subscription "${sub.name}"?`
-    );
+    const ok = await confirm({
+      title: 'Delete subscription',
+      message:
+        count > 0
+          ? `Delete "${sub.name}" and the ${count} node${count !== 1 ? 's' : ''} imported from it?`
+          : `Delete "${sub.name}"?`,
+      confirmLabel: 'Delete',
+      danger: true,
+    });
     if (!ok) return;
     removeNodesBySubscription(sub.id);
     removeSubscription(sub.id);
+    // Drop the scheduler's in-memory penalty for this id along with it, so a
+    // deleted subscription leaves nothing behind that a re-added one could inherit.
+    resetSubscriptionBackoff(sub.id);
+  };
+
+  /**
+   * Save an edit to an existing subscription.
+   *
+   * A changed URL points at a different provider, so the nodes currently held
+   * under this subscription no longer came from it. Refresh immediately so the
+   * node list matches what the user just entered instead of leaving stale nodes
+   * attributed to the new URL, and clear any failure backoff so a URL corrected
+   * to fix a broken subscription takes effect now rather than up to 30 minutes
+   * later.
+   */
+  const handleSaveEdit = async (original: Subscription, updated: Subscription) => {
+    const urlChanged = original.url !== updated.url;
+    updateSubscription(original.id, {
+      name: updated.name,
+      url: updated.url,
+      autoUpdate: updated.autoUpdate,
+      updateInterval: updated.updateInterval,
+      ...(urlChanged ? { lastUpdate: undefined } : {}),
+    });
+    setDialog(null);
+    if (urlChanged) {
+      resetSubscriptionBackoff(original.id);
+      await handleUpdateOne({ ...original, ...updated });
+    }
   };
 
   const handleUpdateOne = async (sub: Subscription) => {
@@ -93,7 +135,7 @@ export default function SubscriptionManager() {
             <RefreshCw size={14} className={updatingAll ? 'animate-spin' : ''} />
             {updatingAll ? 'Updating...' : 'Update All'}
           </button>
-          <button onClick={() => setShowAddDialog(true)} className="btn-primary flex items-center gap-1.5">
+          <button onClick={() => setDialog('add')} className="btn-primary flex items-center gap-1.5">
             <Plus size={14} />
             Add Subscription
           </button>
@@ -166,6 +208,13 @@ export default function SubscriptionManager() {
                   <RefreshCw size={14} className={updatingId === sub.id ? 'animate-spin' : ''} />
                 </button>
                 <button
+                  onClick={() => setDialog(sub)}
+                  className="btn-icon"
+                  title="Edit name, URL and update schedule"
+                >
+                  <Edit3 size={14} />
+                </button>
+                <button
                   onClick={() => updateSubscription(sub.id, { enabled: !sub.enabled })}
                   className="btn-icon"
                   title={sub.enabled ? 'Disable' : 'Enable'}
@@ -185,42 +234,62 @@ export default function SubscriptionManager() {
         )}
       </div>
 
-      {/* Add Dialog */}
-      {showAddDialog && (
-        <AddSubscriptionDialog
-          onClose={() => setShowAddDialog(false)}
-          onAdd={(sub) => {
-            addSubscription(sub);
-            setShowAddDialog(false);
+      {/* Add / Edit Dialog */}
+      {dialog && (
+        <SubscriptionDialog
+          // Remount when switching between subscriptions so the fields reflect
+          // whichever one was opened rather than keeping the previous values.
+          key={dialog === 'add' ? 'add' : dialog.id}
+          existing={dialog === 'add' ? null : dialog}
+          onClose={() => setDialog(null)}
+          onSave={(sub) => {
+            if (dialog === 'add') {
+              addSubscription(sub);
+              setDialog(null);
+            } else {
+              void handleSaveEdit(dialog, sub);
+            }
           }}
         />
       )}
+
+      {confirmDialog}
     </div>
   );
 }
 
-function AddSubscriptionDialog({
+function SubscriptionDialog({
+  existing,
   onClose,
-  onAdd,
+  onSave,
 }: {
+  /** The subscription being edited, or null when adding a new one. */
+  existing: Subscription | null;
   onClose: () => void;
-  onAdd: (sub: Subscription) => void;
+  onSave: (sub: Subscription) => void;
 }) {
-  const [name, setName] = useState('');
-  const [url, setUrl] = useState('');
-  const [autoUpdate, setAutoUpdate] = useState(true);
-  const [updateInterval, setUpdateInterval] = useState(12);
+  const [name, setName] = useState(existing?.name ?? '');
+  const [url, setUrl] = useState(existing?.url ?? '');
+  const [autoUpdate, setAutoUpdate] = useState(existing?.autoUpdate ?? true);
+  const [updateInterval, setUpdateInterval] = useState(existing?.updateInterval ?? 12);
+
+  const isEdit = existing !== null;
+  const urlChanged = isEdit && url.trim() !== existing.url;
 
   const handleSubmit = () => {
-    if (!name || !url) return;
-    onAdd({
-      id: Date.now().toString(36) + Math.random().toString(36).substr(2, 9),
-      name,
-      url,
-      nodeCount: 0,
+    const trimmedName = name.trim();
+    const trimmedUrl = url.trim();
+    if (!trimmedName || !trimmedUrl) return;
+    onSave({
+      // Editing keeps the identity and history; only the fields on this form move.
+      id: existing?.id ?? Date.now().toString(36) + Math.random().toString(36).slice(2, 11),
+      name: trimmedName,
+      url: trimmedUrl,
+      nodeCount: existing?.nodeCount ?? 0,
+      lastUpdate: existing?.lastUpdate,
       autoUpdate,
       updateInterval,
-      enabled: true,
+      enabled: existing?.enabled ?? true,
     });
   };
 
@@ -228,7 +297,7 @@ function AddSubscriptionDialog({
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
       <div className="bg-surface-800 border border-surface-700 rounded-xl w-[460px]" onClick={(e) => e.stopPropagation()}>
         <div className="p-4 border-b border-surface-700">
-          <h3 className="text-base font-semibold">Add Subscription</h3>
+          <h3 className="text-base font-semibold">{isEdit ? 'Edit Subscription' : 'Add Subscription'}</h3>
         </div>
 
         <div className="p-4 space-y-3">
@@ -240,6 +309,7 @@ function AddSubscriptionDialog({
               onChange={(e) => setName(e.target.value)}
               placeholder="My Subscription"
               className="input-field"
+              autoFocus
             />
           </div>
 
@@ -252,6 +322,12 @@ function AddSubscriptionDialog({
               placeholder="https://example.com/api/v1/client/subscribe?token=..."
               className="input-field font-mono text-xs"
             />
+            {urlChanged && (
+              <p className="text-[11px] text-yellow-300 mt-1.5">
+                The URL changed, so this subscription's existing nodes came from the old one. Saving
+                refreshes it now and replaces those nodes.
+              </p>
+            )}
           </div>
 
           <div className="flex items-center gap-2">
@@ -283,10 +359,10 @@ function AddSubscriptionDialog({
           <button onClick={onClose} className="btn-secondary">Cancel</button>
           <button
             onClick={handleSubmit}
-            disabled={!name || !url}
+            disabled={!name.trim() || !url.trim()}
             className="btn-primary"
           >
-            Add Subscription
+            {isEdit ? 'Save Changes' : 'Add Subscription'}
           </button>
         </div>
       </div>

@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld('api', {
     clearLogs: () => ipcRenderer.invoke('singbox:clear-logs'),
     select: (selector: string, outbound: string) =>
       ipcRenderer.invoke('singbox:select', selector, outbound),
+    getSelection: (selector: string) => ipcRenderer.invoke('singbox:selection', selector),
     checkUpdate: () => ipcRenderer.invoke('singbox:check-update'),
     upgrade: () => ipcRenderer.invoke('singbox:upgrade'),
     onUpgradeProgress: (callback: (data: { stage: string; percent?: number; message?: string }) => void) => {

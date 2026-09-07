@@ -179,6 +179,7 @@ function buildAnytls(node: ProxyNode): string {
 const NO_LINK_FORMAT: Record<string, string> = {
   wireguard: 'WireGuard has no share-link format — export the peer config or use a Clash subscription.',
   shadowtls: 'ShadowTLS has no share-link format — it is only carried by Clash/Mihomo subscriptions.',
+  openvpn: 'OpenVPN has no share-link format — share the .ovpn profile file instead.',
 };
 
 export interface LinkResult {

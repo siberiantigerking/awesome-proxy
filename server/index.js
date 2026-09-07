@@ -516,9 +516,31 @@ app.post('/api/singbox/upgrade', (_req, res) => {
   res.json({ success: false, error: 'Core upgrade is only available in the desktop app.' });
 });
 
-app.post('/api/config/generate', (req, res) => {
+/**
+ * Cached sing-box version, used to decide which config surface to generate.
+ *
+ * Some fields only exist in newer cores and are rejected outright by older ones
+ * ("json: unknown field ..."), so the generator has to know what it is talking
+ * to. Cached because config generation happens on every connect.
+ */
+let cachedCoreVersion = null;
+
+function getCoreVersion() {
+  if (cachedCoreVersion !== null) return Promise.resolve(cachedCoreVersion);
+  return new Promise((resolve) => {
+    const singboxPath = getSingboxPath();
+    exec('"' + singboxPath + '" version', (error, stdout) => {
+      const match = !error && stdout && stdout.match(/sing-box version (\S+)/);
+      cachedCoreVersion = match ? match[1] : '0.0.0';
+      resolve(cachedCoreVersion);
+    });
+  });
+}
+
+app.post('/api/config/generate', async (req, res) => {
   const { nodes, selectedIndex, settings } = req.body;
-  res.json({ config: generateSingboxConfig(nodes, selectedIndex, settings) });
+  const coreVersion = await getCoreVersion();
+  res.json({ config: generateSingboxConfig(nodes, selectedIndex, { ...settings, coreVersion }) });
 });
 
 app.post('/api/config/write', (req, res) => {

@@ -25,6 +25,9 @@ export default function Dashboard() {
   const { traffic, settings } = useSettingsStore();
   const [isConnecting, setIsConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Connected, but something couldn't be verified. Shown less loudly than an
+  // error because the connection is usable.
+  const [warning, setWarning] = useState<string | null>(null);
 
   const selectedNode = selectedIndex >= 0 && selectedIndex < nodes.length ? nodes[selectedIndex] : null;
 
@@ -32,6 +35,7 @@ export default function Dashboard() {
     if (!window.api) return;
     setIsConnecting(true);
     setError(null);
+    setWarning(null);
     try {
       if (connectionStatus === 'connected') {
         await disconnect();
@@ -40,6 +44,7 @@ export default function Dashboard() {
         if (!res.ok && !res.elevating && res.error) {
           setError(res.error);
         }
+        if (res.warning) setWarning(res.warning);
       }
     } catch (err) {
       console.error('Connection error:', err);
@@ -51,8 +56,10 @@ export default function Dashboard() {
 
   const handleQuickSwitch = async (index: number) => {
     // Shared with the Nodes page so both paths actually move live traffic.
+    setWarning(null);
     const res = await switchNode(index);
     if (!res.ok && res.error) setError(res.error);
+    if (res.warning) setWarning(res.warning);
   };
 
   const chartData = traffic.history.map((d, i) => ({
@@ -71,6 +78,20 @@ export default function Dashboard() {
             onClick={() => setError(null)}
             className="text-red-400 hover:text-red-200 text-xs shrink-0"
             aria-label="Dismiss error"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
+      {/* Warning banner: connected, but something is unconfirmed. */}
+      {warning && (
+        <div className="rounded-lg border border-yellow-500/40 bg-yellow-500/10 px-4 py-3 flex items-start justify-between gap-3">
+          <p className="text-sm text-yellow-300 break-words">{warning}</p>
+          <button
+            onClick={() => setWarning(null)}
+            className="text-yellow-400 hover:text-yellow-200 text-xs shrink-0"
+            aria-label="Dismiss warning"
           >
             ✕
           </button>

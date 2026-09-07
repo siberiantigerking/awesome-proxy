@@ -25,6 +25,55 @@
 
 const VALID_TRANSPORTS = new Set(['ws', 'grpc', 'http', 'quic']);
 
+// ==================== Core Version Gating ====================
+//
+// The config surface is NOT the same across cores, and the app can end up
+// running a core newer than the one it shipped with, because Settings → About
+// can upgrade sing-box independently of the app. So anything that only exists
+// in a newer core has to be gated, or we generate a config the running core
+// rejects outright ("json: unknown field ...") and nothing connects at all.
+//
+// Verified against both real binaries: 1.13.18 REJECTS `hysteria2.disable_chrome_parrot`,
+// `obfs.type: gecko` and OpenVPN endpoints, all of which 1.14.0 accepts. Those
+// three are what the gate is for.
+//
+// A gate is NOT enough on its own: `check` accepting a field does not mean the
+// core will start with it. `rule_set.http_client` is the cautionary case — it is
+// a valid 1.14 field that passes `check` and then fails at startup, so it stayed
+// on the older `download_detour` spelling instead (see the `rule_set` block).
+// Any new gated field has to be verified by actually RUNNING the core.
+//
+// `coreVersion` is passed in via settings by whichever side generates the config
+// (electron/main.ts and server/index.js both detect it from the binary). When it
+// is missing or unparseable we assume the OLDEST supported surface, because
+// emitting a field the core does not know is fatal while omitting a new one
+// merely loses an optimisation.
+const CORE_1_14 = '1.14.0';
+
+function compareCoreVersions(a, b) {
+  const parse = (v) =>
+    String(v || '')
+      .replace(/^v/, '')
+      // "1.14.0-rc.5" → [1, 14, 0]: a pre-release of X carries X's config
+      // surface, so treating it as X is correct here.
+      .split('-')[0]
+      .split('.')
+      .map((n) => parseInt(n, 10) || 0);
+  const pa = parse(a);
+  const pb = parse(b);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] || 0) - (pb[i] || 0);
+    if (d !== 0) return d > 0 ? 1 : -1;
+  }
+  return 0;
+}
+
+/** True when `version` is at least `minimum`. Unknown versions are treated as older. */
+function coreAtLeast(version, minimum) {
+  if (!version || !/\d/.test(String(version))) return false;
+  return compareCoreVersions(version, minimum) >= 0;
+}
+
 // TUN interface addresses. Exported so the Electron side can recognise (and
 // filter out) our own adapter when listing this machine's LAN addresses.
 const TUN_IPV4 = '198.18.0.1/30';
@@ -37,6 +86,21 @@ const TUN_IPV4 = '198.18.0.1/30';
 // 198.18 from the IPv4 side purely as a mnemonic.)
 const TUN_IPV6 = 'fd19:8180:9a3f::1/126';
 const TUN_IPV4_PREFIX = '198.18.0.';
+
+// Private IPv4 space, fed to the TUN's `route_exclude_address` when
+// `tunBypassLocalNetworks` is on. Covers every bridge the Windows virtual
+// network stacks use: WSL2's NAT and Hyper-V's Default Switch land somewhere in
+// 172.16/12, Docker Desktop uses 172.17/16 plus 192.168.65/24, and a plain LAN
+// is 192.168/16 or 10/8.
+//
+// IPv4 only, deliberately. Those stacks are all IPv4 NAT, and sing-box's own
+// example pairs 192.168.0.0/16 with fc00::/7 — but OUR TUN address lives inside
+// fc00::/7 (see TUN_IPV6), so excluding it would name the tunnel's own prefix as
+// something to keep off the tunnel. Not worth the risk for no gain.
+//
+// 198.18.0.0/15 is absent on purpose even though it is also reserved: that is
+// where the TUN itself sits.
+const LOCAL_NETWORK_RANGES = ['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'];
 
 // ==================== Rule-Set URL Mapping ====================
 // Used by split-mode domain routing to resolve rule_set tags to remote URLs.
@@ -263,11 +327,19 @@ function isValidSs2022Key(method, password) {
  * malformed node can no longer stop every other node from working. Returns a
  * reason string when unusable, or null when fine.
  */
-function nodeRejectionReason(node) {
+function nodeRejectionReason(node, coreVersion) {
   if (!node || typeof node !== 'object') return 'not an object';
   if (!node.type) return 'missing protocol';
   if (!node.server) return 'missing server address';
   if (!toPort(node.port)) return 'invalid port';
+
+  // Gecko obfuscation was added in sing-box 1.14.0. Emitting it against an
+  // older core is fatal, and quietly dropping the obfs instead would be worse
+  // than skipping: a server that requires obfs rejects an unobfuscated client,
+  // so the node would fail anyway with no explanation. Skip it with a reason.
+  if (node.type === 'hysteria2' && node.obfsType === 'gecko' && !coreAtLeast(coreVersion, CORE_1_14)) {
+    return 'obfs "gecko" requires sing-box 1.14.0 or newer (Settings → About → Upgrade Core)';
+  }
 
   if (node.type === 'shadowsocks' || node.type === 'shadowtls') {
     const method = node.method || (node.type === 'shadowtls' ? 'aes-128-gcm' : 'aes-256-gcm');
@@ -290,6 +362,85 @@ function nodeRejectionReason(node) {
   if ((node.type === 'vmess' || node.type === 'vless' || node.type === 'tuic') && !node.uuid) {
     return 'missing uuid';
   }
+  if (node.type === 'openvpn') {
+    const reason = openvpnRejectionReason(node, coreVersion);
+    if (reason) return reason;
+  }
+  return null;
+}
+
+/**
+ * Validation for OpenVPN nodes, which needs to be stricter than the rest.
+ *
+ * Most bad node settings only break that node. A malformed OpenVPN
+ * control-channel key instead makes sing-box 1.14.0 **panic**, and a panic takes
+ * the entire process down — every other node with it. Measured against the
+ * bundled 1.14.0 core:
+ *
+ *   tls_auth / tls_crypt with a 256-byte key  -> fine
+ *   tls_auth / tls_crypt with 128 or 512 byte -> panic, exit code 2
+ *   tls_crypt_v2 (any key we could construct) -> panic, exit code 2
+ *
+ * The panic is inside sing-openvpn (client_session_tls.go setReady on a nil
+ * client) and `sing-box check` does not catch it, so the only safe place to stop
+ * it is here, before the endpoint is ever written.
+ */
+function openvpnRejectionReason(node, coreVersion) {
+  if (!coreAtLeast(coreVersion, CORE_1_14)) {
+    return 'OpenVPN requires sing-box 1.14.0 or newer (Settings → About → Upgrade Core)';
+  }
+  // TLS mode always needs a trust anchor; we only generate TLS mode.
+  if (!node.ovpnCa || !/BEGIN CERTIFICATE/.test(node.ovpnCa)) {
+    return 'missing OpenVPN CA certificate (the <ca> block of the .ovpn file)';
+  }
+  // The core requires both halves or neither.
+  if (Boolean(node.ovpnClientCert) !== Boolean(node.ovpnClientKey)) {
+    return 'OpenVPN client certificate and key must both be present or both absent';
+  }
+  if (node.ovpnControlWrapType) {
+    if (node.ovpnControlWrapType === 'tls_crypt_v2') {
+      return 'tls-crypt-v2 is not supported yet: sing-box 1.14.0 crashes on it, which would take every other node down';
+    }
+    if (node.ovpnControlWrapType !== 'tls_auth' && node.ovpnControlWrapType !== 'tls_crypt') {
+      return `unknown OpenVPN control channel wrapping "${node.ovpnControlWrapType}"`;
+    }
+    const bytes = openvpnStaticKeyBytes(node.ovpnControlWrapKey);
+    if (bytes < 0) return 'OpenVPN tls-auth/tls-crypt key is not a valid OpenVPN Static key V1';
+    if (bytes !== OPENVPN_STATIC_KEY_BYTES) {
+      return `OpenVPN tls-auth/tls-crypt key must be ${OPENVPN_STATIC_KEY_BYTES} bytes, got ${bytes} (a wrong size crashes the core)`;
+    }
+  }
+  return null;
+}
+
+/**
+ * Reason an otherwise-VALID node is left out of this particular config.
+ *
+ * Distinct from nodeRejectionReason: nothing is wrong with the node, it just
+ * cannot coexist with the current selection.
+ *
+ * OpenVPN is the only case. An `openvpn-client` endpoint dials its server at
+ * STARTUP and holds the session open whether or not anything routes through it —
+ * verified against 1.14.0 by pointing an endpoint that no selector, urltest or
+ * route rule referenced at a UDP socket we owned, and still receiving its
+ * handshake. That is inherent to endpoints: they are interfaces, not lazy
+ * dialers.
+ *
+ * So emitting every imported profile opens every VPN session simultaneously.
+ * Providers cap concurrent sessions per account (free tiers commonly at one), so
+ * the first profile connects and the rest silently never establish — no error,
+ * just a node that never works. Exactly what a user hit with three ProtonVPN
+ * profiles: one logged "tunnel established", the other two logged nothing.
+ *
+ * Emitting only the selected profile keeps at most one session alive, and none
+ * at all while a non-OpenVPN node is selected. The cost is that switching to or
+ * between OpenVPN nodes cannot use the Clash API live-switch, because the tag
+ * isn't in the running config; switchNode already falls back to a restart.
+ */
+function nodeInactiveReason(node, tag, selectedTag) {
+  if (node && node.type === 'openvpn' && tag !== selectedTag) {
+    return 'OpenVPN profiles connect one at a time, so this one is only dialled while it is the selected node';
+  }
   return null;
 }
 
@@ -303,13 +454,96 @@ function nodeRejectionReason(node) {
  * tags, so nothing else in the config has to know the difference.
  */
 function isEndpointProtocol(type) {
-  return type === 'wireguard';
+  return type === 'wireguard' || type === 'openvpn';
+}
+
+/**
+ * Split a PEM / OpenVPN key blob into the line array sing-box expects.
+ *
+ * A single multi-line string is also accepted by the core, but the line array
+ * matches the documented shape and survives JSON round-tripping without
+ * depending on how the editor normalised newlines.
+ */
+function pemLines(text) {
+  return String(text || '')
+    .replace(/\r\n?/g, '\n')
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean);
+}
+
+/**
+ * Byte length of an OpenVPN Static key V1 blob, or -1 if it isn't one.
+ *
+ * Used to keep a malformed control-channel key out of the config: see
+ * nodeRejectionReason for why that matters more than usual here.
+ */
+function openvpnStaticKeyBytes(text) {
+  if (typeof text !== 'string' || !/BEGIN\s+OpenVPN\s+Static\s+key/i.test(text)) return -1;
+  const hex = text.replace(/-----[^-]*-----/g, '').replace(/\s+/g, '');
+  if (!hex || !/^[0-9a-fA-F]+$/.test(hex) || hex.length % 2 !== 0) return -1;
+  return hex.length / 2;
+}
+
+/** OpenVPN static keys are always 2048-bit; anything else makes the core panic. */
+const OPENVPN_STATIC_KEY_BYTES = 256;
+
+/**
+ * Convert an OpenVPN ProxyNode into a sing-box `openvpn-client` endpoint.
+ *
+ * Only TLS mode is generated. `static_key` mode is a pre-TLS OpenVPN dialect
+ * with no forward secrecy that upstream keeps purely for immutable enterprise
+ * servers; it shares almost no fields with TLS mode, so supporting it would mean
+ * a second parallel shape for a configuration nobody hands out today.
+ */
+function nodeToOpenvpnEndpoint(node, tag) {
+  const tls = { certificate: pemLines(node.ovpnCa) };
+  // OpenVPN verifies the server certificate NAME rather than sending SNI, so
+  // this is `verify-x509-name`, not a TLS SNI. Left unset means the chain is
+  // still verified but the name is not.
+  if (node.sni) tls.server_name = node.sni;
+  if (node.ovpnClientCert && node.ovpnClientKey) {
+    tls.client_certificate = pemLines(node.ovpnClientCert);
+    tls.client_key = pemLines(node.ovpnClientKey);
+  }
+  if (node.ovpnControlWrapType && node.ovpnControlWrapKey) {
+    tls.control_wrap = {
+      type: node.ovpnControlWrapType,
+      key: pemLines(node.ovpnControlWrapKey),
+    };
+    // Only meaningful for tls-auth; tls-crypt keys are used bidirectionally.
+    if (node.ovpnControlWrapType === 'tls_auth' && node.ovpnControlWrapDirection) {
+      tls.control_wrap.direction = node.ovpnControlWrapDirection;
+    }
+  }
+
+  const endpoint = {
+    type: 'openvpn-client',
+    tag,
+    server: node.server,
+    server_port: node.port,
+    network: node.ovpnNetwork === 'tcp' ? 'tcp' : 'udp',
+    tls,
+  };
+  if (node.username) endpoint.username = node.username;
+  if (node.password) endpoint.password = node.password;
+  if (Array.isArray(node.ovpnDataCiphers) && node.ovpnDataCiphers.length) {
+    endpoint.data_ciphers = node.ovpnDataCiphers;
+  }
+  // `cipher` in an .ovpn file is the pre-negotiation cipher, which maps to
+  // data_ciphers_fallback rather than to data_ciphers.
+  if (node.ovpnDataCiphersFallback) endpoint.data_ciphers_fallback = node.ovpnDataCiphersFallback;
+  if (node.ovpnAuth) endpoint.auth = node.ovpnAuth;
+  if (node.ovpnCompressionLzo) endpoint.compression_lzo = node.ovpnCompressionLzo;
+  if (node.mtu) endpoint.mtu = node.mtu;
+  return endpoint;
 }
 
 /**
  * Convert a WireGuard ProxyNode into a sing-box `endpoints` entry.
  */
 function nodeToEndpoint(node, tag) {
+  if (node.type === 'openvpn') return nodeToOpenvpnEndpoint(node, tag);
   const endpoint = {
     type: 'wireguard',
     tag,
@@ -346,7 +580,7 @@ function nodeToEndpoint(node, tag) {
  * its tag equals `tag` — that's what selectors/route rules reference. Any extra
  * elements are internal helpers with derived tags.
  */
-function nodeToOutbounds(node, tag) {
+function nodeToOutbounds(node, tag, coreVersion) {
   // ShadowTLS is a TLS-camouflage *wrapper*, not a standalone proxy: the real
   // payload is a Shadowsocks connection tunnelled through it. So we emit the
   // shadowtls outbound as a helper and point a shadowsocks outbound at it via
@@ -379,13 +613,13 @@ function nodeToOutbounds(node, tag) {
     return [primary, helper];
   }
 
-  return [nodeToOutbound(node, tag)];
+  return [nodeToOutbound(node, tag, coreVersion)];
 }
 
 /**
  * Convert a single ProxyNode into a sing-box outbound object.
  */
-function nodeToOutbound(node, tag) {
+function nodeToOutbound(node, tag, coreVersion) {
   switch (node.type) {
     case 'vmess': {
       const outbound = {
@@ -463,12 +697,23 @@ function nodeToOutbound(node, tag) {
       }
       // QUIC traffic obfuscation. Both type and password are needed for it to
       // do anything; a server configured with obfs will reject clients without.
+      // "gecko" only exists in 1.14+, and nodeRejectionReason already skips such
+      // a node on an older core, so by here the type is safe to emit.
       if (node.obfsType && node.obfsPassword) {
         outbound.obfs = { type: node.obfsType, password: node.obfsPassword };
       }
       // Bandwidth hints. Omit entirely to let sing-box fall back to BBR.
       if (node.upMbps) outbound.up_mbps = node.upMbps;
       if (node.downMbps) outbound.down_mbps = node.downMbps;
+      // sing-box 1.14 makes the QUIC handshake parrot Chrome by default, which
+      // is good for censorship resistance but breaks one specific case: Chrome
+      // does not advertise Ed25519, so a server presenting an Ed25519
+      // certificate fails the handshake. That turns a node that worked on 1.13
+      // into a dead node purely from upgrading the core, with nothing in the log
+      // pointing at the cause — hence an explicit per-node escape hatch.
+      if (node.disableChromeParrot && coreAtLeast(coreVersion, CORE_1_14)) {
+        outbound.disable_chrome_parrot = true;
+      }
       return outbound;
     }
 
@@ -525,6 +770,9 @@ function generateSingboxConfig(nodes, selectedIndex, settings) {
   const safeNodes = Array.isArray(nodes) ? nodes : [];
   const safeSettings = settings || {};
   const tags = buildOutboundTags(safeNodes);
+  // Version of the core this config will actually be handed to. See the Core
+  // Version Gating notes at the top: unknown means "assume oldest".
+  const coreVersion = safeSettings.coreVersion;
 
   // Materialize every node so the selector/urltest references always resolve
   // (previously only the selected node was emitted, leaving the selector
@@ -538,20 +786,32 @@ function generateSingboxConfig(nodes, selectedIndex, settings) {
   // is still built from the FULL list so it keeps matching the renderer's
   // buildOutboundTags (used for live selector switching); only the emitted
   // outbounds and the group memberships are filtered.
+  // Resolved before the loop because the OpenVPN filter below depends on it.
+  const selectedTag =
+    selectedIndex >= 0 && selectedIndex < tags.length ? tags[selectedIndex] : null;
+
   const nodeOutbounds = [];
   const nodeEndpoints = [];
   const usableTags = [];
   const skipped = [];
   safeNodes.forEach((node, index) => {
-    const reason = nodeRejectionReason(node);
+    const reason = nodeRejectionReason(node, coreVersion);
     if (reason) {
       skipped.push({ tag: tags[index], reason });
+      return;
+    }
+    // Valid, but must not be emitted alongside the current selection. See
+    // nodeInactiveReason: an OpenVPN endpoint connects at startup regardless of
+    // whether anything uses it, so every extra profile burns a session slot.
+    const inactive = nodeInactiveReason(node, tags[index], selectedTag);
+    if (inactive) {
+      skipped.push({ tag: tags[index], reason: inactive });
       return;
     }
     if (isEndpointProtocol(node.type)) {
       nodeEndpoints.push(nodeToEndpoint(node, tags[index]));
     } else {
-      nodeOutbounds.push(...nodeToOutbounds(node, tags[index]));
+      nodeOutbounds.push(...nodeToOutbounds(node, tags[index], coreVersion));
     }
     usableTags.push(tags[index]);
   });
@@ -559,8 +819,6 @@ function generateSingboxConfig(nodes, selectedIndex, settings) {
   const hasNodes = usableTags.length > 0;
   // Fall back to the first usable node when the selected one was skipped —
   // pointing a selector at a non-existent outbound is itself a fatal error.
-  const selectedTag =
-    selectedIndex >= 0 && selectedIndex < tags.length ? tags[selectedIndex] : null;
   const defaultTag =
     selectedTag && usableTags.includes(selectedTag)
       ? selectedTag
@@ -581,20 +839,66 @@ function generateSingboxConfig(nodes, selectedIndex, settings) {
 
   // IPv6 handling for TUN/Split. See AppSettings.ipv6Strategy for the rationale.
   //
-  // Defaults to 'prefer-ipv4': the TUN is dual-stack so IPv6 is captured by the
-  // tunnel (it can never escape via the physical interface, so the real address
-  // stays hidden) and is then actually proxied. IPv4 is still preferred for
-  // dual-stack destinations.
+  // Defaults to 'block': the TUN is dual-stack, so IPv6 ENTERS the tunnel and is
+  // dealt with by the route rules (downgraded to IPv4, or refused as a backstop)
+  // instead of escaping to the physical interface.
   //
-  // 'block' used to be the default. It is equally leak-safe but leaves the
-  // machine with a black-holed IPv6 default route, which measurably degrades
-  // behaviour on IPv6-capable networks (Windows connectivity probes retry, and
-  // anything that insists on IPv6 fails instead of working). It stays available
-  // for users who want IPv6 hard-off.
+  // The default has moved twice, so it is worth being explicit about why this is
+  // where it lands.
+  //
+  // It was 'prefer-ipv4' — dual-stack TUN, IPv6 carried to the node. That broke
+  // on IPv4-only nodes: the dual-stack TUN convinces Windows that IPv6 works, so
+  // per RFC 6724 apps prefer IPv6 for nearly everything, and the node cannot
+  // deliver it. Confirmed from a user's TUN log: every IPv6 destination logged
+  // "inbound connection to [...]" and produced no outbound at all.
+  //
+  // It was then 'ipv4-only' — no IPv6 address on the TUN at all, which is what
+  // mihomo/clash and v2rayN ship. That fixed the stall, but it does not capture
+  // IPv6, so on a network with real IPv6 that traffic leaves via the physical
+  // interface. Confirmed by a user: ip.sb in TUN mode reported their real IPv6
+  // address. Fast and compatible, but it silently defeats the tunnel, which is
+  // not an acceptable default for a proxy client.
+  //
+  // 'block' is the resolution, and it is only viable because of the IPv6→IPv4
+  // downgrade added to the route rules below. Withholding AAAA via DNS never
+  // worked (DoH browsers do not ask us) and rejecting outright made apps look
+  // broken. Rewriting the destination to IPv4 at routing time fixes both: the
+  // real address cannot leak because the packets are inside the tunnel, and the
+  // request still completes over the IPv4-only node.
+  //
+  // 'ipv4-only' stays available: an IPv6-less TUN is the most compatible option
+  // for virtual network stacks (WSL2 mirrored mode, Docker, Hyper-V), so it is
+  // the fallback when the dual-stack TUN causes trouble there.
   const ipv6Strategy =
-    safeSettings.ipv6Strategy === 'block' || safeSettings.ipv6Strategy === 'ipv4-only'
+    safeSettings.ipv6Strategy === 'ipv4-only' || safeSettings.ipv6Strategy === 'prefer-ipv4'
       ? safeSettings.ipv6Strategy
-      : 'prefer-ipv4';
+      : 'block';
+
+  // TCP/IP stack for the TUN inbound. See AppSettings.tunStack.
+  //
+  // This used to be hardcoded to 'gvisor' on the theory that a userspace
+  // netstack is more resilient under sustained load. Measurement said the
+  // opposite: video in TUN mode was extremely slow while the same node was fine
+  // through the local mixed inbound, which points at the stack rather than the
+  // node. gvisor reassembles every IP datagram into TCP streams in userspace,
+  // so it is the most CPU-expensive of the three for bulk TCP.
+  //
+  // Nobody else forces it. sing-box's own default is 'mixed' when the gVisor
+  // build tag is present (ours is), v2rayN ships 'system' in its TUN template,
+  // and NekoRay exposes the choice as a user setting instead of picking one.
+  // There are also reports of gvisor specifically misbehaving on Windows under
+  // full-tunnel routing, so forcing it was the riskiest option available.
+  //
+  // Default is therefore 'mixed' — system TCP for throughput, gvisor UDP so
+  // endpoint-independent NAT stays available — with the other two selectable
+  // for anyone whose setup disagrees.
+  const tunStack =
+    safeSettings.tunStack === 'system' || safeSettings.tunStack === 'gvisor'
+      ? safeSettings.tunStack
+      : 'mixed';
+  // `endpoint_independent_nat` is documented as gvisor-only; 'mixed' qualifies
+  // because it uses the gvisor UDP stack, which is what this option governs.
+  const stackSupportsEndpointIndependentNat = tunStack === 'gvisor' || tunStack === 'mixed';
 
   // Domain-based split rules (rule_set routing)
   const domainSplitRules = Array.isArray(safeSettings.splitRules)
@@ -712,6 +1016,17 @@ function generateSingboxConfig(nodes, selectedIndex, settings) {
     log: { level: safeSettings.logLevel || 'info', timestamp: true },
     dns: {
       servers: [
+        // sing-box's `local` server does NOT resolve `localhost`: measured
+        // against the bundled core, a lookup goes to the upstream resolver and
+        // comes back NXDOMAIN, so a request naming localhost dies even when it
+        // was correctly routed direct. Windows resolves it via the hosts file /
+        // its own special-casing, which the core does not consult. Answering it
+        // ourselves is the only way to make the name usable inside the tunnel.
+        {
+          tag: 'hosts-dns',
+          type: 'hosts',
+          predefined: { localhost: ['127.0.0.1', '::1'] },
+        },
         { tag: 'local-dns', type: 'local' },
         remoteDns,
         // AliDNS for the China-direct split, also by IP literal (its cert
@@ -720,38 +1035,32 @@ function generateSingboxConfig(nodes, selectedIndex, settings) {
       ],
       // CLIENT-facing resolution strategy. This is what the browser/OS sees.
       //
-      // Critical subtlety learned the hard way: `prefer_ipv4` does NOT stop
-      // AAAA records reaching the client. In TUN mode the client issues its
-      // own A and AAAA queries and sing-box answers both. Combined with a
-      // dual-stack TUN — which makes Windows believe it has real IPv6
-      // connectivity — the OS then *prefers* IPv6 per RFC 6724. So
-      // `prefer_ipv4` + reject-IPv6 meant "try IPv6 first, then get rejected",
-      // i.e. broken browsing, the exact opposite of the intent.
+      // `prefer_ipv4` does NOT withhold AAAA — it only ORDERS the answers. In
+      // TUN mode the client issues its own A and AAAA queries and sing-box
+      // answers both, and because a dual-stack TUN makes Windows believe it has
+      // real IPv6 connectivity, the OS then prefers IPv6 per RFC 6724. So
+      // serving `prefer_ipv4` effectively means "use IPv6 for everything".
       //
-      // For 'block' we therefore use `ipv4_only`, which withholds AAAA from
-      // the client entirely: it simply never attempts IPv6, so there is
-      // nothing to stall on. The reject rule below then exists purely as a
-      // backstop for hardcoded IPv6 literals (which bypass DNS), keeping them
-      // captured-and-rejected instead of leaking.
+      //   'prefer-ipv4' → `prefer_ipv4`. The UI calls this "Allow IPv6". The
+      //     user has opted in to carrying IPv6 through the tunnel, so AAAA has
+      //     to reach the client or nothing ever uses IPv6 and the option does
+      //     nothing. Withholding it here was a real bug: the tunnel was
+      //     dual-stack and ready, ip.sb still reported no IPv6, because every
+      //     cooperating app was only ever handed an A record. Requires the
+      //     node's server to have IPv6 egress.
       //
-      // ALL THREE strategies serve clients `ipv4_only`. 'prefer-ipv4' used to
-      // serve `prefer_ipv4`, and that was a mistake worth spelling out, because
-      // it looks harmless:
+      //   'block' → `ipv4_only`. Clients never attempt IPv6, so there is
+      //     nothing to stall on; the reject rule is then only a backstop for
+      //     IPv6 literals that bypass DNS.
       //
-      // `prefer_ipv4` only orders the answers, it still hands AAAA to the
-      // client. In TUN mode the OS asks for A and AAAA separately, sing-box
-      // answers both, and because the TUN is dual-stack Windows believes it has
-      // working IPv6 and picks it per RFC 6724. So virtually every connection
-      // left over IPv6 — and if the selected node is IPv4-only, the far end
-      // cannot deliver any of it. The node looks broken while the config looks
-      // fine.
+      //   'ipv4-only' → `ipv4_only`. The TUN has no IPv6 route at all, so
+      //     handing out AAAA would push traffic onto the physical interface,
+      //     i.e. straight past the tunnel.
       //
-      // Withholding AAAA makes clients use IPv4, which every node can carry.
-      // What still separates the three strategies is how IPv6 that appears
-      // ANYWAY (hardcoded literals, which bypass DNS entirely) is handled:
-      // 'prefer-ipv4' proxies it, 'block' rejects it, 'ipv4-only' never
-      // captures it in the first place.
-      strategy: 'ipv4_only',
+      // Note this only governs apps that ask US. Browsers with built-in DoH
+      // resolve AAAA themselves regardless, which is why the default keeps IPv6
+      // off the TUN entirely rather than relying on DNS. See ipv6Strategy.
+      strategy: ipv6Strategy === 'prefer-ipv4' ? 'prefer_ipv4' : 'ipv4_only',
       rules: [
         { domain_suffix: ['.cn', '.baidu.com', '.qq.com', '.taobao.com', '.jd.com', '.alipay.com'], server: 'direct-dns' },
       ],
@@ -776,25 +1085,92 @@ function generateSingboxConfig(nodes, selectedIndex, settings) {
       rules: [
         { action: 'sniff' },
         { protocol: 'dns', action: 'hijack-dns' },
+        // Turn `localhost` into an address before the IP rules run.
+        //
+        // `route.default_domain_resolver` pins outbound resolution to local-dns
+        // and bypasses dns.rules entirely, so a dns rule cannot fix this — only
+        // the resolve action, which takes its own `server`. Verified against the
+        // bundled core: with this rule a request to http://localhost:PORT
+        // reaches the local server; without it, it fails NXDOMAIN.
+        { domain: ['localhost'], action: 'resolve', server: 'hosts-dns' },
         // Private ranges stay direct. Deliberately BEFORE the IPv6 reject so
         // link-local / ULA IPv6 (fe80::, fc00::) keeps working on the LAN.
         { ip_is_private: true, outbound: 'direct' },
-        // Backstop for 'block' mode, TUN/Split only.
+        // Names that can only mean "this machine or this network".
         //
-        // Normal traffic never gets here because dns.strategy is `ipv4_only`,
-        // so the client is never handed an AAAA record and never tries IPv6.
-        // This rule catches what DNS cannot: hardcoded IPv6 literals (e.g.
-        // Chrome's Secure DNS providers dial 2606:4700:4700::1111 directly).
-        // Those are captured by the dual-stack TUN and rejected here rather
-        // than escaping via the physical interface, which is what would leak
-        // the real address.
+        // The rule above cannot catch these. It matches a RESOLVED IP, and
+        // sing-box resolves a destination only when an explicit
+        // `action: "resolve"` rule asks it to, so a request that names a host
+        // falls straight through to `final` — the proxy. Measured through our
+        // own inbound against a local web server: http://127.0.0.1:PORT
+        // returned 200 while http://localhost:PORT was reset, because the
+        // latter was sent out through the remote node.
+        //
+        // This matters most for clients that never see Windows' ProxyOverride:
+        // WSL2 with http_proxy pointed at us is exactly that, and so is any app
+        // given an explicit proxy. The `domain_regex` is the equivalent of
+        // Windows' `<local>` token — a single-label name cannot be a public
+        // site, so it belongs to the local network by definition.
+        //
+        // Two limits worth knowing, both of which the Windows bypass list
+        // (ProxyOverride, set by the app when it enables the system proxy)
+        // handles instead:
+        //   - A SINGLE-LABEL name cannot be resolved by the core at all.
+        //     Windows finds those via NetBIOS/mDNS, which sing-box does not
+        //     speak; measured, this machine's own name returns NXDOMAIN through
+        //     every DNS server we could point at it. Sending them direct is
+        //     still right — it keeps an internal hostname from being handed to
+        //     a remote proxy — but only Windows can actually connect them.
+        //   - Intranet hosts that merely RESOLVE to a private IP under a
+        //     public-looking name are not matched here; catching those would
+        //     mean resolving every domain before routing.
+        {
+          domain: ['localhost'],
+          domain_suffix: ['.localhost', '.local', '.internal', '.lan', '.home.arpa'],
+          domain_regex: ['^[^.]+$'],
+          outbound: 'direct',
+        },
+        // 'block' mode, TUN/Split only: IPv6 is captured by the dual-stack TUN
+        // and handled here rather than escaping via the physical interface,
+        // which is what would leak the real address.
+        //
+        // Two rules, in this order, and the order is the whole point:
+        //
+        //   1. DOWNGRADE. `resolve` with an explicit `ipv4_only` strategy takes
+        //      the domain recovered by the `sniff` rule at the top and re-resolves
+        //      it to an A record, rewriting the destination from IPv6 to IPv4.
+        //      The connection then proceeds normally through the proxy. This is
+        //      what makes the mode usable: a browser with its own DoH (Brave,
+        //      Chrome Secure DNS, Firefox) resolves AAAA without ever asking us,
+        //      so `dns.strategy: ipv4_only` cannot keep it on IPv4 — but we can
+        //      still put it back on IPv4 here, at routing time. `strategy` has to
+        //      be set explicitly: without it the resolve inherits
+        //      `default_domain_resolver`'s `prefer_ipv4`, which happily returns
+        //      the AAAA again and the rewrite accomplishes nothing.
+        //
+        //   2. REJECT, as a backstop only. Reached when step 1 had nothing to
+        //      work with: a hardcoded IPv6 literal with no sniffable domain
+        //      (Chrome's Secure DNS bootstrap does exactly this, e.g.
+        //      2606:4700:4700::1111), or a domain that is genuinely IPv6-only.
+        //      `resolve` is non-terminal, so anything step 1 rewrote is IPv4 by
+        //      now and no longer matches `ip_version: 6`.
+        //
+        // Previously this was the reject alone. That leaked nothing but read as
+        // "the app is broken": reject is silent and fires only after the gvisor
+        // stack has already completed the TCP handshake, so every DoH-resolved
+        // IPv6 destination saw an established connection and then a reset. The
+        // downgrade removes that for everything carrying an SNI/Host, which is
+        // effectively all web traffic.
         //
         // In System/Manual mode there is no TUN, so the browser's IPv6 (and
         // its leaky WebRTC UDP) never enters sing-box at all. Rejecting here
         // would buy no privacy while breaking IPv6-only sites that the proxy
         // could otherwise reach, so we leave IPv6 alone in those modes.
         ...(ipv6Strategy === 'block' && (safeSettings.proxyMode === 'tun' || isSplit)
-          ? [{ ip_version: 6, action: 'reject' }]
+          ? [
+              { ip_version: 6, action: 'resolve', strategy: 'ipv4_only' },
+              { ip_version: 6, action: 'reject' },
+            ]
           : []),
         ...splitRouteRules,
         ...legacySplitRules,
@@ -802,6 +1178,26 @@ function generateSingboxConfig(nodes, selectedIndex, settings) {
           ? [{ domain_suffix: ['.cn', '.baidu.com', '.qq.com', '.taobao.com', '.jd.com', '.alipay.com'], outbound: 'direct' }]
           : []),
       ],
+      // Rule-sets download over the DIRECT path, not through the proxy: the
+      // proxy may not be up yet at startup, and a rule-set fetch that waits on
+      // it delays every route decision.
+      //
+      // `download_detour` is deprecated in 1.14 (removed in 1.16) in favour of
+      // `http_client`, but it is kept UNCONDITIONALLY here, because none of the
+      // replacements is usable yet:
+      //   - `http_client: { detour: 'direct' }` passes `check` and then dies at
+      //     startup with "detour to an empty direct outbound makes no sense" —
+      //     the same bare-`direct` restriction the DNS block below documents.
+      //     `download_detour: 'direct'` is exempt from it; the new inline
+      //     `http_client` is not.
+      //   - `http_client: {}` or omitting it works, but then rule-sets download
+      //     through the *default* outbound (the proxy) and it warns about the
+      //     also-deprecated implicit default HTTP client.
+      //   - a top-level `http_clients` tag plus `route.default_http_client` is
+      //     the only fully clean 1.14 form, but 1.13 rejects `http_client` as an
+      //     unknown field, which is fatal for the whole config.
+      // So this stays on the one spelling both cores accept. The cost is a WARN
+      // line; revisit when the supported floor moves past 1.13 or 1.16 nears.
       rule_set: [...usedRuleSetTags].map((tag) => ({
         type: 'remote',
         tag: tag,
@@ -823,7 +1219,25 @@ function generateSingboxConfig(nodes, selectedIndex, settings) {
       // Persist downloaded rule-sets and selector selections across restarts so
       // remote rule-sets only download once (not every start), avoiding a
       // first-run delay/flicker in Split mode.
-      cache_file: { enabled: true },
+      //
+      // `path` is set explicitly. Left empty, sing-box writes `cache.db`
+      // relative to its own WORKING DIRECTORY, which for a packaged app is
+      // wherever the core happened to be spawned from — so the file ends up
+      // outside the app's data directory, cannot be found when something needs
+      // clearing, and may sit in a location the process cannot even write.
+      // Pinning it next to the generated config keeps it discoverable.
+      //
+      // Worth knowing what this file does to selections: sing-box has no
+      // `store_selected` switch to turn off (see the cache-file docs — the only
+      // fields are enabled/path/cache_id/store_fakeip/store_rdrc/store_dns), so
+      // whenever the cache is on, every selector's last choice is restored on
+      // the next start and OVERRIDES the `default` emitted here. That is why the
+      // active node must always be re-asserted through the Clash API after the
+      // core starts, and why `default` alone can never be trusted.
+      cache_file: {
+        enabled: true,
+        ...(safeSettings.cacheFilePath ? { path: String(safeSettings.cacheFilePath) } : {}),
+      },
     },
   };
 
@@ -889,17 +1303,50 @@ function generateSingboxConfig(nodes, selectedIndex, settings) {
           ? [TUN_IPV4]
           : [TUN_IPV4, TUN_IPV6],
       auto_route: true,
+      // Always on, and no longer user-controllable.
+      //
       // strict_route forces everything through the tunnel with extra firewall
-      // rules. That is what makes the tunnel leak-proof, but it also drops
-      // traffic belonging to virtual network stacks that share the host's:
-      // WSL2 in mirrored networking mode, Docker and Hyper-V. Users hitting
-      // that can turn it off and keep a working (if slightly leakier) tunnel.
-      strict_route: safeSettings.tunStrictRoute === false ? false : true,
-      // gvisor is a userspace netstack and is more resilient than the
-      // Windows "system" stack under sustained load/high connection churn,
-      // which matches the "works for a while, then TUN stops passing
-      // traffic" symptom. The bundled binary is built with the gvisor tag.
-      stack: 'gvisor',
+      // rules. On Windows one of those rules is load-bearing for DNS, not just
+      // for leak-proofing: since 1.14 the TUN's `dns_mode` defaults to `hijack`,
+      // and the Windows half of `hijack` is a WFP filter blocking port 53 on
+      // every interface except the TUN — which the docs gate explicitly on
+      // strict_route. Drop it and Windows' Smart Multi-Homed Name Resolution
+      // races the tunnel's resolver against the local network's, keeping the
+      // first answer back. The local one wins on latency every time (single-digit
+      // ms vs the 200ms+ visible in our own logs), so the network you are on
+      // decides what every hostname resolves to. Measured symptom: the tunnel
+      // carries traffic fine and no site loads.
+      //
+      // It was previously exposed as `tunStrictRoute` so users could unbreak
+      // WSL2 mirrored mode / Docker / Hyper-V. Those need their private subnets
+      // kept off the tunnel, not the firewall rules removed from the whole
+      // machine, so that job moved to `route_exclude_address` below.
+      strict_route: true,
+      // Targeted escape hatch for virtual network stacks that share the host's.
+      // Omitted entirely when off, so the default config is byte-for-byte what
+      // it was before this option existed.
+      ...(safeSettings.tunBypassLocalNetworks
+        ? { route_exclude_address: [...LOCAL_NETWORK_RANGES] }
+        : {}),
+      // Named explicitly rather than left to sing-box's default, so the adapter
+      // is identifiable in `ipconfig` / routing tables and in any firewall rule
+      // a user needs to write. NekoRay does the same.
+      interface_name: 'awesome-tun0',
+      // sing-box's own default is also 9000. Stated explicitly because the
+      // value matters for throughput and should be visible here rather than
+      // inherited silently.
+      mtu: 9000,
+      ...(stackSupportsEndpointIndependentNat
+        ? {
+            // Required for UDP protocols that expect a single source port to
+            // reach multiple peers — WebRTC, game netcode, some QUIC paths.
+            // Only meaningful on gvisor; the docs note other stacks are
+            // endpoint-independent already, so it is omitted for `system` to
+            // avoid setting a field that stack does not implement.
+            endpoint_independent_nat: true,
+          }
+        : {}),
+      stack: tunStack,
     });
   }
 
@@ -909,10 +1356,15 @@ function generateSingboxConfig(nodes, selectedIndex, settings) {
 module.exports = {
   generateSingboxConfig,
   nodeRejectionReason,
+  nodeInactiveReason,
+  openvpnStaticKeyBytes,
+  coreAtLeast,
+  CORE_1_14,
   toPort,
   TUN_IPV4,
   TUN_IPV6,
   TUN_IPV4_PREFIX,
+  LOCAL_NETWORK_RANGES,
   nodeToOutbound,
   nodeToOutbounds,
   nodeToEndpoint,

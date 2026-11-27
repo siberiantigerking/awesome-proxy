@@ -5,6 +5,10 @@ import { useNodeStore } from '../store/nodeStore';
 import { useSettingsStore } from '../store/settingsStore';
 import { getCountryFlag, getProtocolColor } from '../services/node-parser';
 import { connect, disconnect, switchNode } from '../services/connection';
+import { DEFAULT_DIRECT_DNS, DEFAULT_REMOTE_DNS, effectiveDnsServer } from '../services/dns-servers';
+import { useCoreCrashStore } from '../store/coreCrashStore';
+import { useAppUpdateStore } from '../store/appUpdateStore';
+import PendingApplyBanner from '../components/PendingApplyBanner';
 import type { ProxyNode } from '../types';
 
 function formatBytes(bytes: number): string {
@@ -20,6 +24,29 @@ function formatSpeed(bytesPerSec: number): string {
   return formatBytes(bytesPerSec) + '/s';
 }
 
+/**
+ * A Proxy Information cell for Remote or Direct DNS. It shows the server the
+ * generator actually emits, which is the default when the setting doesn't
+ * parse (dnsServerEntry in shared/config-generator.cjs). Showing the raw
+ * setting named a server that was not in use (audit P0-8).
+ */
+function DnsInfoCell({ label, value, fallback }: { label: string; value: string; fallback: string }) {
+  const dns = effectiveDnsServer(value, fallback);
+  // Only a typed value needs the explanation; an empty field just means the default.
+  const invalid = dns.usingDefault && typeof value === 'string' && value.trim() !== '';
+  return (
+    <div className="flex justify-between p-2 bg-surface-800/50 rounded">
+      <span className="text-surface-500">{label}</span>
+      <span
+        className="text-surface-200 font-mono truncate ml-2"
+        title={invalid ? `Default — the setting is invalid: ${dns.error}` : undefined}
+      >
+        {dns.text}
+      </span>
+    </div>
+  );
+}
+
 export default function Dashboard() {
   const { nodes, selectedIndex, connectionStatus } = useNodeStore();
   const { traffic, settings } = useSettingsStore();
@@ -28,8 +55,21 @@ export default function Dashboard() {
   // Connected, but something couldn't be verified. Shown less loudly than an
   // error because the connection is usable.
   const [warning, setWarning] = useState<string | null>(null);
+  // Main's watchdog couldn't bring sing-box back; shown until dismissed or the
+  // next successful connect.
+  const crash = useCoreCrashStore((s) => s.crash);
+  const clearCrash = useCoreCrashStore((s) => s.clearCrash);
+  // The updater is disconnecting to run the installer; connecting now would
+  // leave a core running that locks sing-box.exe for it (connect() refuses too).
+  const updateInstalling = useAppUpdateStore((s) => s.status.state === 'installing');
 
   const selectedNode = selectedIndex >= 0 && selectedIndex < nodes.length ? nodes[selectedIndex] : null;
+
+  // A pushed 'connecting' only comes from main's watchdog restarting a core
+  // that stopped unexpectedly (a normal start goes straight to 'connected').
+  // There is still a connection to end, and a second connect would race the
+  // restart, so the button offers Disconnect.
+  const offersDisconnect = connectionStatus === 'connected' || connectionStatus === 'connecting';
 
   const handleConnect = async () => {
     if (!window.api) return;
@@ -37,7 +77,7 @@ export default function Dashboard() {
     setError(null);
     setWarning(null);
     try {
-      if (connectionStatus === 'connected') {
+      if (offersDisconnect) {
         await disconnect();
       } else {
         const res = await connect();
@@ -70,6 +110,31 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-6 max-w-4xl mx-auto">
+      {/* Core crash banner: the core kept stopping and the app disconnected.
+          Plain text only; the lines are the core's own log output. */}
+      {crash && (
+        <div
+          role="alert"
+          className="rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 flex items-start justify-between gap-3"
+        >
+          <div className="min-w-0">
+            <p className="text-sm text-red-300 break-words">{crash.message}</p>
+            {crash.lines.length > 0 && (
+              <pre className="mt-2 text-xs text-red-300/80 font-mono whitespace-pre-wrap break-words">
+                {crash.lines.join('\n')}
+              </pre>
+            )}
+          </div>
+          <button
+            onClick={clearCrash}
+            className="text-red-400 hover:text-red-200 text-xs shrink-0"
+            aria-label="Dismiss core crash notice"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
       {/* Error Banner */}
       {error && (
         <div className="rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 flex items-start justify-between gap-3">
@@ -97,6 +162,10 @@ export default function Dashboard() {
           </button>
         </div>
       )}
+
+      {/* The core still runs an older node list or settings (e.g. after a
+          subscription refresh while connected). */}
+      <PendingApplyBanner />
 
       {/* Connection Status Card */}
       <div className="card relative overflow-hidden">
@@ -163,22 +232,25 @@ export default function Dashboard() {
           </div>
 
           {/* Connect Button */}
-          <button
-            onClick={handleConnect}
-            disabled={isConnecting || nodes.length === 0}
-            className={`px-6 py-3 rounded-xl font-medium transition-all duration-300 flex items-center gap-2 ${
-              connectionStatus === 'connected'
-                ? 'bg-red-600 hover:bg-red-700 text-white'
-                : 'bg-primary-600 hover:bg-primary-700 text-white'
-            } disabled:opacity-50 disabled:cursor-not-allowed active:scale-95`}
-          >
-            <Power size={18} />
-            {isConnecting
-              ? 'Connecting...'
-              : connectionStatus === 'connected'
-              ? 'Disconnect'
-              : 'Connect'}
-          </button>
+          <div className="flex flex-col items-end gap-1">
+            <button
+              onClick={handleConnect}
+              disabled={isConnecting || nodes.length === 0 || updateInstalling}
+              className={`px-6 py-3 rounded-xl font-medium transition-all duration-300 flex items-center gap-2 ${
+                offersDisconnect
+                  ? 'bg-red-600 hover:bg-red-700 text-white'
+                  : 'bg-primary-600 hover:bg-primary-700 text-white'
+              } disabled:opacity-50 disabled:cursor-not-allowed active:scale-95`}
+            >
+              <Power size={18} />
+              {isConnecting
+                ? 'Connecting...'
+                : offersDisconnect
+                ? 'Disconnect'
+                : 'Connect'}
+            </button>
+            {updateInstalling && <p className="text-xs text-surface-500">Installing an update…</p>}
+          </div>
         </div>
       </div>
 
@@ -318,12 +390,10 @@ export default function Dashboard() {
               <span className="text-surface-500">Proxy Mode</span>
               <span className="text-surface-200 font-mono">{settings.proxyMode}</span>
             </div>
+            <DnsInfoCell label="Remote DNS" value={settings.remoteDns} fallback={DEFAULT_REMOTE_DNS} />
+            <DnsInfoCell label="Direct DNS" value={settings.directDns} fallback={DEFAULT_DIRECT_DNS} />
             <div className="flex justify-between p-2 bg-surface-800/50 rounded">
-              <span className="text-surface-500">Remote DNS</span>
-              <span className="text-surface-200 font-mono truncate ml-2">{settings.remoteDns}</span>
-            </div>
-            <div className="flex justify-between p-2 bg-surface-800/50 rounded">
-              <span className="text-surface-500">Bypass China</span>
+              <span className="text-surface-500">China domains direct</span>
               <span className="text-surface-200 font-mono">{settings.bypassChina ? 'Yes' : 'No'}</span>
             </div>
           </div>

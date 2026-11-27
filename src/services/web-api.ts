@@ -25,21 +25,6 @@ function localStorageDelete(key: string): void {
   localStorage.removeItem(STORAGE_PREFIX + key);
 }
 
-// Default settings
-const defaultSettings = {
-  socksPort: 1080,
-  httpPort: 8080,
-  mixedPort: 7890,
-  proxyMode: 'system',
-  remoteDns: 'https://dns.google/dns-query',
-  directDns: 'https://dns.alidns.com/dns-query',
-  bypassChina: true,
-  logLevel: 'info',
-  autoStart: false,
-  startMinimized: false,
-  theme: 'dark',
-};
-
 // ==================== Backend communication ====================
 
 async function apiFetch(path: string, options?: RequestInit): Promise<any> {
@@ -141,7 +126,7 @@ export const webApi = {
       const result = await apiGet('/singbox/check-update');
       return result || { success: false, error: 'Core upgrade is only available in the desktop app.' };
     },
-    upgrade: async () => {
+    upgrade: async (_options?: { allowUnvalidated?: boolean }) => {
       const result = await apiPost('/singbox/upgrade');
       return result || { success: false, error: 'Core upgrade is only available in the desktop app.' };
     },
@@ -159,11 +144,14 @@ export const webApi = {
     },
   },
 
+  // No `updater` here on purpose: in-app updates are desktop-only
+  // (electron-updater), and Settings shows a note when window.api.updater is
+  // absent.
+
   // Tray is desktop-only; no-op in web mode.
   tray: {
     setMode: async (_mode: string) => {},
     onConnect: (_callback: () => void) => {},
-    onDisconnect: (_callback: () => void) => {},
   },
 
   config: {
@@ -174,10 +162,6 @@ export const webApi = {
     write: async (config: object) => {
       const result = await apiPost('/config/write', { config });
       return result?.path || 'config-saved';
-    },
-    read: async () => {
-      const result = await apiGet('/config/read');
-      return result?.config || null;
     },
   },
 
@@ -211,33 +195,6 @@ export const webApi = {
       });
     },
     selectDirectory: async () => null,
-    readText: async (_filePath: string) => {
-      return new Promise<string>((resolve) => {
-        const input = document.createElement('input');
-        input.type = 'file';
-        input.onchange = () => {
-          const file = input.files?.[0];
-          if (file) {
-            const reader = new FileReader();
-            reader.onload = () => resolve(reader.result as string);
-            reader.readAsText(file);
-          } else {
-            resolve('');
-          }
-        };
-        input.click();
-      });
-    },
-    writeText: async (_filePath: string, content: string) => {
-      const blob = new Blob([content], { type: 'text/plain' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = _filePath.split(/[/\\]/).pop() || 'output.txt';
-      a.click();
-      URL.revokeObjectURL(url);
-      return true;
-    },
   },
 
   store: {

@@ -1,0 +1,497 @@
+{
+  "log": {
+    "level": "info",
+    "timestamp": true
+  },
+  "dns": {
+    "servers": [
+      {
+        "tag": "hosts-dns",
+        "type": "hosts",
+        "predefined": {
+          "localhost": [
+            "127.0.0.1",
+            "::1"
+          ]
+        }
+      },
+      {
+        "tag": "local-dns",
+        "type": "local"
+      },
+      {
+        "tag": "remote-dns",
+        "type": "https",
+        "server": "1.1.1.1",
+        "path": "/dns-query",
+        "detour": "proxy"
+      },
+      {
+        "tag": "direct-dns",
+        "type": "https",
+        "server": "223.5.5.5",
+        "path": "/dns-query"
+      }
+    ],
+    "strategy": "ipv4_only",
+    "rules": [
+      {
+        "domain_suffix": [
+          ".cn",
+          ".baidu.com",
+          ".qq.com",
+          ".taobao.com",
+          ".jd.com",
+          ".alipay.com"
+        ],
+        "server": "direct-dns"
+      }
+    ],
+    "final": "remote-dns"
+  },
+  "endpoints": [
+    {
+      "type": "wireguard",
+      "tag": "wireguard",
+      "address": [
+        "10.0.0.2/32",
+        "fd00::2/128"
+      ],
+      "private_key": "iIGbFKdo9vdiXQQRQCtAdstbfI7edqrHIn8XgE0X0EI=",
+      "peers": [
+        {
+          "address": "127.0.0.1",
+          "port": 19194,
+          "public_key": "ZKw+L8OgzvCHV9VGZCBdPNqernMi0E+aRp2m177c1lQ=",
+          "allowed_ips": [
+            "0.0.0.0/0",
+            "::/0"
+          ],
+          "pre_shared_key": "AMa/l+dkp3gwvM3rFsm8ZKzpBbfJJWGbdRA22wrSFjs=",
+          "reserved": [
+            1,
+            2,
+            3
+          ],
+          "persistent_keepalive_interval": 25
+        }
+      ],
+      "mtu": 1408
+    },
+    {
+      "type": "openvpn-client",
+      "tag": "ovpn-tls-auth",
+      "server": "127.0.0.1",
+      "server_port": 19195,
+      "network": "udp",
+      "tls": {
+        "certificate": [
+          "-----BEGIN CERTIFICATE-----",
+          "MIIDDzCCAfegAwIBAgIQCpYE96NyziZSXbsv7WDcSzANBgkqhkiG9w0BAQsFADAa",
+          "MRgwFgYDVQQDEw9maXh0dXJlLmludmFsaWQwHhcNMjYxMTA4MDUzMjIyWhcNMjYx",
+          "MjA4MDYzMjIxWjAaMRgwFgYDVQQDEw9maXh0dXJlLmludmFsaWQwggEiMA0GCSqG",
+          "SIb3DQEBAQUAA4IBDwAwggEKAoIBAQDZBac7S0m7odgly97FAXcNYHdYwMe8wYnC",
+          "yFZGOCqtFdZQAvkeC7NLByUWxgPiEnVOi6huMdH7gdvyWYu/mFE2CxoJ9yNgJDcO",
+          "T/Pl3KWvjkwvrss3oO+54nem3EhGpSr4a7JXjhSigyaJNYrVWSC+7pHCIW4q5BNK",
+          "0wwzsxY8VgHzGW4OLI5fa/nlJ3WFo4K7IGYx/8lSnK95xnlDXTergXB4qCpfwaXk",
+          "lAoPiTcuPThzst5yGzDNExNUQTM+6XXDANbBW7el/Ze4ViS6xXhWLSJAgS4GcEQP",
+          "ClofOgzcHQICXTOFSHVoHwjBMn7a4gZlWfzQTKPH/MEAAc1HXGMPAgMBAAGjUTBP",
+          "MA4GA1UdDwEB/wQEAwIFoDATBgNVHSUEDDAKBggrBgEFBQcDATAMBgNVHRMBAf8E",
+          "AjAAMBoGA1UdEQQTMBGCD2ZpeHR1cmUuaW52YWxpZDANBgkqhkiG9w0BAQsFAAOC",
+          "AQEAI3nYB5V5zcVkyTaJUE24DOVtX7Y44yk7mEonvumKkkdP8dGpvF1rTW4od5/S",
+          "ZsTQ+9/CF9CL7AcOuKo8/TBodb5cTpm0gDUQlg3Ux3c0e09BvHmHbYBf2J4RDGrd",
+          "a1EL2oJp6ufRK7qE/pgxIIL6zMQb1l8Ec3/tR8PG1+voIj7SuVejGrpz2dz1fwFR",
+          "K6NCXBFl5w/7LtNXysGUGxqDZLhwJCvdLbzEGMcKoJXL1kWLaJbbPQjepHkGiWKb",
+          "w3ndhMJ3s76zPyDcSGJ4E0+ZsW5rtO6Ag63aBGBPyWHimCOyovdModIzd+psInEg",
+          "AwPc9ut/tR3LCK8W623RZ7WNEA==",
+          "-----END CERTIFICATE-----"
+        ],
+        "control_wrap": {
+          "type": "tls_auth",
+          "key": [
+            "-----BEGIN OpenVPN Static key V1-----",
+            "94483451c0e00834294aebfe9acbcd0e",
+            "5ccd39ff4477557387dcd05e45dc4ff3",
+            "7252f89f9f2bf6e189dbfbc944575484",
+            "62e4c85f0f0a246bd9ad5a49da51d409",
+            "4126df488443f749cbfa2ee4577d9ab1",
+            "d4b87ac651c5e5d7a865cbd768ea72be",
+            "25ebe87bd5ba37416a30abc53ecd2f7a",
+            "73a7b209b5f85f36c7ad657a6228995f",
+            "70c8c62b6c1f0150f183769bdee940ff",
+            "9ca00a14e0f79c5913ff88f32d143312",
+            "a250fe0bee675138f977cfee42629a90",
+            "699d1d73e20bf8392711d90bdf03874c",
+            "7a3452235966ae558e9eb87df0f8f4c1",
+            "e1765e0e57904ba8099fcd0de90d9678",
+            "86a442583ebffb17f2897c061b153773",
+            "cfc812fac1a58ab1f968b31a6e2c009a",
+            "-----END OpenVPN Static key V1-----"
+          ],
+          "direction": "client"
+        }
+      },
+      "username": "ovpn-user",
+      "password": "ovpn-password",
+      "data_ciphers": [
+        "AES-256-GCM",
+        "AES-128-GCM"
+      ],
+      "auth": "SHA256"
+    }
+  ],
+  "inbounds": [
+    {
+      "type": "mixed",
+      "tag": "mixed-in",
+      "listen": "127.0.0.1",
+      "listen_port": 7890
+    },
+    {
+      "type": "socks",
+      "tag": "socks-in",
+      "listen": "127.0.0.1",
+      "listen_port": 1080
+    },
+    {
+      "type": "http",
+      "tag": "http-in",
+      "listen": "127.0.0.1",
+      "listen_port": 8080
+    },
+    {
+      "type": "tun",
+      "tag": "tun-in",
+      "address": [
+        "198.18.0.1/30",
+        "fd19:8180:9a3f::1/126"
+      ],
+      "auto_route": true,
+      "strict_route": true,
+      "route_exclude_address": [
+        "10.0.0.0/8",
+        "172.16.0.0/12",
+        "192.168.0.0/16"
+      ],
+      "interface_name": "awesome-tun0",
+      "mtu": 9000,
+      "stack": "system"
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "selector",
+      "tag": "proxy",
+      "outbounds": [
+        "auto",
+        "direct",
+        "vmess-ws-tls",
+        "vmess-grpc-utls",
+        "vmess-tcp",
+        "vless-reality-vision",
+        "trojan-tls",
+        "ss-aes-256-gcm",
+        "ss-2022-blake3-aes-128-gcm",
+        "hy2-salamander-hop",
+        "hy2-gecko",
+        "tuic-v5",
+        "anytls",
+        "shadowtls-v3",
+        "wireguard",
+        "ovpn-tls-auth",
+        "dup",
+        "dup-1"
+      ],
+      "default": "ovpn-tls-auth",
+      "interrupt_exist_connections": true
+    },
+    {
+      "type": "urltest",
+      "tag": "auto",
+      "outbounds": [
+        "vmess-ws-tls",
+        "vmess-grpc-utls",
+        "vmess-tcp",
+        "vless-reality-vision",
+        "trojan-tls",
+        "ss-aes-256-gcm",
+        "ss-2022-blake3-aes-128-gcm",
+        "hy2-salamander-hop",
+        "hy2-gecko",
+        "tuic-v5",
+        "anytls",
+        "shadowtls-v3",
+        "wireguard",
+        "ovpn-tls-auth",
+        "dup",
+        "dup-1"
+      ],
+      "url": "https://cp.cloudflare.com/generate_204",
+      "interval": "3m",
+      "tolerance": 50
+    },
+    {
+      "type": "vmess",
+      "tag": "vmess-ws-tls",
+      "server": "127.0.0.1",
+      "server_port": 19193,
+      "uuid": "2420e4a1-e97c-4780-a7a0-f47b2a402ba7",
+      "alter_id": 0,
+      "security": "auto",
+      "tls": {
+        "enabled": true,
+        "server_name": "example.com"
+      },
+      "transport": {
+        "type": "ws",
+        "path": "/ws",
+        "headers": {
+          "Host": "example.com"
+        }
+      }
+    },
+    {
+      "type": "vmess",
+      "tag": "vmess-grpc-utls",
+      "server": "127.0.0.1",
+      "server_port": 19194,
+      "uuid": "2420e4a1-e97c-4780-a7a0-f47b2a402ba7",
+      "alter_id": 0,
+      "security": "auto",
+      "tls": {
+        "enabled": true,
+        "server_name": "example.com",
+        "utls": {
+          "enabled": true,
+          "fingerprint": "chrome"
+        }
+      },
+      "transport": {
+        "type": "grpc",
+        "service_name": "grpc-svc"
+      }
+    },
+    {
+      "type": "vmess",
+      "tag": "vmess-tcp",
+      "server": "127.0.0.1",
+      "server_port": 19195,
+      "uuid": "2420e4a1-e97c-4780-a7a0-f47b2a402ba7",
+      "alter_id": 0,
+      "security": "auto"
+    },
+    {
+      "type": "vless",
+      "tag": "vless-reality-vision",
+      "server": "127.0.0.1",
+      "server_port": 19196,
+      "uuid": "2420e4a1-e97c-4780-a7a0-f47b2a402ba7",
+      "flow": "xtls-rprx-vision",
+      "tls": {
+        "enabled": true,
+        "server_name": "www.example.com",
+        "reality": {
+          "enabled": true,
+          "public_key": "WtyFbF5JOHxY52iYnUbP15Zy4t_AdUGN0Nu5S5t9JEo",
+          "short_id": "0123abcd"
+        },
+        "utls": {
+          "enabled": true,
+          "fingerprint": "chrome"
+        }
+      }
+    },
+    {
+      "type": "trojan",
+      "tag": "trojan-tls",
+      "server": "127.0.0.1",
+      "server_port": 19197,
+      "password": "trojan-password",
+      "tls": {
+        "enabled": true,
+        "server_name": "example.com"
+      }
+    },
+    {
+      "type": "shadowsocks",
+      "tag": "ss-aes-256-gcm",
+      "server": "127.0.0.1",
+      "server_port": 19198,
+      "method": "aes-256-gcm",
+      "password": "ss-password"
+    },
+    {
+      "type": "shadowsocks",
+      "tag": "ss-2022-blake3-aes-128-gcm",
+      "server": "127.0.0.1",
+      "server_port": 19199,
+      "method": "2022-blake3-aes-128-gcm",
+      "password": "oU4dz5lCiAHOgjTzhuNBLw=="
+    },
+    {
+      "type": "hysteria2",
+      "tag": "hy2-salamander-hop",
+      "server": "127.0.0.1",
+      "password": "hy2-password",
+      "tls": {
+        "enabled": true,
+        "server_name": "example.com"
+      },
+      "server_ports": [
+        "19196:19198"
+      ],
+      "hop_interval": "30s",
+      "obfs": {
+        "type": "salamander",
+        "password": "salamander-password"
+      },
+      "up_mbps": 50,
+      "down_mbps": 200,
+      "disable_chrome_parrot": true
+    },
+    {
+      "type": "hysteria2",
+      "tag": "hy2-gecko",
+      "server": "127.0.0.1",
+      "password": "hy2-password",
+      "tls": {
+        "enabled": true,
+        "server_name": "example.com"
+      },
+      "server_port": 19197,
+      "obfs": {
+        "type": "gecko",
+        "password": "gecko-password"
+      }
+    },
+    {
+      "type": "tuic",
+      "tag": "tuic-v5",
+      "server": "127.0.0.1",
+      "server_port": 19198,
+      "uuid": "2420e4a1-e97c-4780-a7a0-f47b2a402ba7",
+      "tls": {
+        "enabled": true,
+        "server_name": "example.com"
+      },
+      "password": "tuic-password",
+      "congestion_control": "bbr",
+      "udp_relay_mode": "native"
+    },
+    {
+      "type": "anytls",
+      "tag": "anytls",
+      "server": "127.0.0.1",
+      "server_port": 19199,
+      "password": "anytls-password",
+      "tls": {
+        "enabled": true,
+        "server_name": "example.com"
+      }
+    },
+    {
+      "type": "shadowsocks",
+      "tag": "shadowtls-v3",
+      "method": "aes-128-gcm",
+      "password": "inner-ss-password",
+      "detour": "shadowtls:shadowtls-v3"
+    },
+    {
+      "type": "shadowtls",
+      "tag": "shadowtls:shadowtls-v3",
+      "server": "127.0.0.1",
+      "server_port": 19193,
+      "version": 3,
+      "tls": {
+        "enabled": true,
+        "server_name": "www.example.com"
+      },
+      "password": "shadowtls-password"
+    },
+    {
+      "type": "shadowsocks",
+      "tag": "dup",
+      "server": "127.0.0.1",
+      "server_port": 19198,
+      "method": "aes-128-gcm",
+      "password": "dup-password-a"
+    },
+    {
+      "type": "shadowsocks",
+      "tag": "dup-1",
+      "server": "127.0.0.1",
+      "server_port": 19199,
+      "method": "aes-128-gcm",
+      "password": "dup-password-b"
+    },
+    {
+      "type": "direct",
+      "tag": "direct"
+    }
+  ],
+  "route": {
+    "rules": [
+      {
+        "action": "sniff"
+      },
+      {
+        "protocol": "dns",
+        "action": "hijack-dns"
+      },
+      {
+        "domain": [
+          "localhost"
+        ],
+        "action": "resolve",
+        "server": "hosts-dns"
+      },
+      {
+        "ip_is_private": true,
+        "outbound": "direct"
+      },
+      {
+        "domain": [
+          "localhost"
+        ],
+        "domain_suffix": [
+          ".localhost",
+          ".local",
+          ".internal",
+          ".lan",
+          ".home.arpa"
+        ],
+        "domain_regex": [
+          "^[^.]+$"
+        ],
+        "outbound": "direct"
+      },
+      {
+        "ip_version": 6,
+        "action": "resolve",
+        "strategy": "ipv4_only"
+      },
+      {
+        "ip_version": 6,
+        "action": "reject"
+      }
+    ],
+    "rule_set": [],
+    "auto_detect_interface": true,
+    "default_domain_resolver": {
+      "server": "local-dns",
+      "strategy": "prefer_ipv4"
+    },
+    "final": "proxy"
+  },
+  "experimental": {
+    "clash_api": {
+      "external_controller": "127.0.0.1:19191",
+      "external_ui": "",
+      "secret": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    "cache_file": {
+      "enabled": true,
+      "path": "C:\\awesome-proxy-test\\cache.db"
+    }
+  }
+}

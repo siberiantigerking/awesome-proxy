@@ -9,9 +9,12 @@ import TitleBar from './components/TitleBar';
 import { useNodeStore } from './store/nodeStore';
 import { useSettingsStore } from './store/settingsStore';
 import { useSubscriptionStore } from './store/subscriptionStore';
+import { useCoreCrashStore } from './store/coreCrashStore';
 import { applyTheme, watchSystemTheme } from './services/theme';
 import { startAutoUpdateScheduler } from './services/auto-update';
-import { connect, disconnect, resumePendingConnect } from './services/connection';
+import { storeRefreshHooks } from './services/subscription-refresh';
+import { scheduleStartupUpdateCheck, subscribeToAppUpdates } from './services/app-updater';
+import { connect, resumePendingConnect } from './services/connection';
 import type { ConnectionStatus } from './types';
 
 export type Page = 'dashboard' | 'nodes' | 'subscriptions' | 'settings' | 'logs';
@@ -49,13 +52,14 @@ function App() {
       try {
         await Promise.all([loadNodes(), loadSettings(), loadSubscriptions()]);
 
-        // Get app info
-        try {
-          const version = await window.api.singbox.getVersion();
-          setSingboxVersion(version);
-        } catch {
-          setSingboxVersion('Not available');
-        }
+        // Get app info. The core version is NOT awaited: the probe can take
+        // seconds while Defender scans a new binary (compat R2), and nothing in
+        // the first render depends on it. Started inside .then() so a missing
+        // window.api still lands in .catch() instead of aborting init().
+        Promise.resolve()
+          .then(() => window.api.singbox.getVersion())
+          .then(setSingboxVersion)
+          .catch(() => setSingboxVersion('Not available'));
 
         try {
           const appVersion = await window.api.app.getVersion();
@@ -117,36 +121,42 @@ function App() {
       });
     }
 
-    // Tray's single Connect/Disconnect menu item asks the renderer to do the
-    // actual work — connecting needs node selection, elevation handling, and
-    // Clash API calls that live here, not in the main process.
+    // Main's core watchdog gave up restarting sing-box: keep the notice for the
+    // Dashboard banner. Desktop only; web mode has no onCrashed.
+    const unsubscribeCrashes =
+      window.api?.singbox?.onCrashed?.((info) => useCoreCrashStore.getState().setCrash(info)) ?? (() => {});
+
+    // The tray's Connect asks the renderer to do the actual work: connecting
+    // needs node selection, elevation handling, and Clash API calls that live
+    // here, not in the main process. Its Disconnect runs in main and reaches
+    // this window only as the usual 'disconnected' status change. A pushed
+    // 'connecting' is the watchdog restarting the core, which a second connect
+    // must not race.
     window.api?.tray?.onConnect(() => {
-      if (useNodeStore.getState().connectionStatus !== 'connected') {
+      const status = useNodeStore.getState().connectionStatus;
+      if (status !== 'connected' && status !== 'connecting') {
         connect().catch((err) => console.error('Tray connect failed:', err));
       }
     });
-    window.api?.tray?.onDisconnect(() => {
-      if (useNodeStore.getState().connectionStatus === 'connected') {
-        disconnect().catch((err) => console.error('Tray disconnect failed:', err));
-      }
-    });
+
+    // App self-update (not the subscription scheduler below): mirror main's
+    // status for the Settings dot, and run the optional quiet startup check.
+    // Both are no-ops in web mode.
+    const unsubscribeAppUpdates = subscribeToAppUpdates();
+    const cancelStartupUpdateCheck = scheduleStartupUpdateCheck();
 
     // Start the subscription auto-update scheduler. It reads live store state
-    // on each tick, so it always sees the latest subscriptions/nodes.
-    const stopScheduler = startAutoUpdateScheduler({
-      getSubscriptions: () => useSubscriptionStore.getState().subscriptions,
-      getNodes: () => useNodeStore.getState().nodes,
-      setNodes: (nodes) => useNodeStore.getState().setNodes(nodes),
-      onSubscriptionUpdated: (id, nodeCount) =>
-        useSubscriptionStore.getState().updateSubscription(id, {
-          lastUpdate: Date.now(),
-          nodeCount,
-        }),
-      onError: (id, error) => console.warn('Auto-update failed for', id, error),
-    });
+    // on each tick, so it always sees the latest subscriptions/nodes, and it
+    // refreshes through the same store hooks as the Subscriptions page.
+    const stopScheduler = startAutoUpdateScheduler(
+      storeRefreshHooks((id, error) => console.warn('Auto-update failed for', id, error))
+    );
 
     return () => {
       stopScheduler();
+      unsubscribeAppUpdates();
+      cancelStartupUpdateCheck();
+      unsubscribeCrashes();
     };
   }, []);
 

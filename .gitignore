@@ -12,6 +12,10 @@ cache.db
 
 # Generated config written at runtime by dev-mode runs.
 sing-box-config.json
+# The previous core kept by an in-app core upgrade. In dev mode the upgrade
+# replaces resources\bin\sing-box.exe in the working tree and keeps the old one
+# next to it; never commit or package it (package.json excludes *.bak too).
+resources/bin/*.bak
 
 # Command output captured to files during manual builds/verification.
 # (PowerShell mangles inline output, so we tee to a file and read it back.)
@@ -24,3 +28,4 @@ tmp-*.json
 # Local IDE/editor state
 .vscode/
 .idea/
+.agents/

@@ -1,0 +1,70 @@
+# Clash/Mihomo fixture for the "mihomo fidelity (audit P1-8)" cases in
+# tests/unit/clash-yaml.test.ts: mihomo's own spellings of ShadowTLS (an ss
+# proxy with the shadow-tls plugin, with and without a version), HTTPUpgrade
+# (ws with v2ray-http-upgrade) and HTTP/2 (network h2 with h2-opts), and a
+# transport sing-box lacks (xhttp). Dummy values; nothing here reaches a real
+# server.
+proxies:
+  - name: ss shadow-tls v3
+    type: ss
+    server: stls.example.com
+    port: 443
+    cipher: aes-128-gcm
+    password: inner-ss-password
+    client-fingerprint: chrome
+    plugin: shadow-tls
+    plugin-opts:
+      host: www.example.com
+      password: shadowtls-password
+      version: 3
+
+  - name: ss shadow-tls default version
+    type: ss
+    server: stls.example.com
+    port: 8443
+    cipher: chacha20-ietf-poly1305
+    password: inner-ss-password-2
+    plugin: shadow-tls
+    plugin-opts:
+      host: cloud.example.com
+      password: shadowtls-password-2
+      skip-cert-verify: true
+
+  - name: vmess httpupgrade
+    type: vmess
+    server: vmess.example.com
+    port: 443
+    uuid: 2420e4a1-e97c-4780-a7a0-f47b2a402ba7
+    alterId: 0
+    cipher: auto
+    tls: true
+    servername: sni.example.com
+    network: ws
+    ws-opts:
+      path: /upgrade
+      headers:
+        Host: cdn.example.com
+      v2ray-http-upgrade: true
+
+  - name: vless h2
+    type: vless
+    server: vless.example.com
+    port: 443
+    uuid: 2420e4a1-e97c-4780-a7a0-f47b2a402ba7
+    tls: true
+    servername: sni.example.com
+    network: h2
+    h2-opts:
+      host:
+        - h2.example.com
+        - h2-alt.example.com
+      path: /h2
+
+  - name: vless xhttp
+    type: vless
+    server: vless.example.com
+    port: 443
+    uuid: 2420e4a1-e97c-4780-a7a0-f47b2a402ba7
+    tls: true
+    servername: sni.example.com
+    network: xhttp

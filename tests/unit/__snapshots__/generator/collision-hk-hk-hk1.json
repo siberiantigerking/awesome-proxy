@@ -1,0 +1,182 @@
+{
+  "log": {
+    "level": "info",
+    "timestamp": true
+  },
+  "dns": {
+    "servers": [
+      {
+        "tag": "hosts-dns",
+        "type": "hosts",
+        "predefined": {
+          "localhost": [
+            "127.0.0.1",
+            "::1"
+          ]
+        }
+      },
+      {
+        "tag": "local-dns",
+        "type": "local"
+      },
+      {
+        "tag": "remote-dns",
+        "type": "https",
+        "server": "1.1.1.1",
+        "path": "/dns-query",
+        "detour": "proxy"
+      },
+      {
+        "tag": "direct-dns",
+        "type": "https",
+        "server": "223.5.5.5",
+        "path": "/dns-query"
+      }
+    ],
+    "strategy": "ipv4_only",
+    "rules": [
+      {
+        "domain_suffix": [
+          ".cn",
+          ".baidu.com",
+          ".qq.com",
+          ".taobao.com",
+          ".jd.com",
+          ".alipay.com"
+        ],
+        "server": "direct-dns"
+      }
+    ],
+    "final": "remote-dns"
+  },
+  "inbounds": [
+    {
+      "type": "mixed",
+      "tag": "mixed-in",
+      "listen": "127.0.0.1",
+      "listen_port": 7890
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "selector",
+      "tag": "proxy",
+      "outbounds": [
+        "auto",
+        "direct",
+        "HK",
+        "HK-1",
+        "HK-1-1"
+      ],
+      "default": "HK",
+      "interrupt_exist_connections": true
+    },
+    {
+      "type": "urltest",
+      "tag": "auto",
+      "outbounds": [
+        "HK",
+        "HK-1",
+        "HK-1-1"
+      ],
+      "url": "https://cp.cloudflare.com/generate_204",
+      "interval": "3m",
+      "tolerance": 50
+    },
+    {
+      "type": "shadowsocks",
+      "tag": "HK",
+      "server": "127.0.0.1",
+      "server_port": 19199,
+      "method": "aes-128-gcm",
+      "password": "collision-password-0"
+    },
+    {
+      "type": "shadowsocks",
+      "tag": "HK-1",
+      "server": "127.0.0.1",
+      "server_port": 19199,
+      "method": "aes-128-gcm",
+      "password": "collision-password-1"
+    },
+    {
+      "type": "shadowsocks",
+      "tag": "HK-1-1",
+      "server": "127.0.0.1",
+      "server_port": 19199,
+      "method": "aes-128-gcm",
+      "password": "collision-password-2"
+    },
+    {
+      "type": "direct",
+      "tag": "direct"
+    }
+  ],
+  "route": {
+    "rules": [
+      {
+        "action": "sniff"
+      },
+      {
+        "protocol": "dns",
+        "action": "hijack-dns"
+      },
+      {
+        "domain": [
+          "localhost"
+        ],
+        "action": "resolve",
+        "server": "hosts-dns"
+      },
+      {
+        "ip_is_private": true,
+        "outbound": "direct"
+      },
+      {
+        "domain": [
+          "localhost"
+        ],
+        "domain_suffix": [
+          ".localhost",
+          ".local",
+          ".internal",
+          ".lan",
+          ".home.arpa"
+        ],
+        "domain_regex": [
+          "^[^.]+$"
+        ],
+        "outbound": "direct"
+      },
+      {
+        "domain_suffix": [
+          ".cn",
+          ".baidu.com",
+          ".qq.com",
+          ".taobao.com",
+          ".jd.com",
+          ".alipay.com"
+        ],
+        "outbound": "direct"
+      }
+    ],
+    "rule_set": [],
+    "auto_detect_interface": true,
+    "default_domain_resolver": {
+      "server": "local-dns",
+      "strategy": "prefer_ipv4"
+    },
+    "final": "proxy"
+  },
+  "experimental": {
+    "clash_api": {
+      "external_controller": "127.0.0.1:19191",
+      "external_ui": "",
+      "secret": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    "cache_file": {
+      "enabled": true,
+      "path": "C:\\awesome-proxy-test\\cache.db"
+    }
+  }
+}

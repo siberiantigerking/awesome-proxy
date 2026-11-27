@@ -1,25 +1,36 @@
 import type { Subscription, ProxyNode } from '../types';
-import { fetchSubscription } from './subscription-fetcher';
+import { fetchSubscription, updateAllSubscriptions } from './subscription-fetcher';
 
 /**
- * Auto-update scheduler for subscriptions.
+ * Subscription refreshes: the auto-update scheduler, and the single and
+ * "Update All" refreshes the Subscriptions page runs.
  *
- * Runs a single low-frequency interval (default every 60s) and, on each tick,
- * refreshes any enabled subscription whose `updateInterval` (hours) has elapsed
- * since its `lastUpdate`. Refreshed nodes replace the old nodes for that
- * subscription, mirroring the manual "Update" button behaviour.
+ * The scheduler runs a single low-frequency interval (default every 60s) and,
+ * on each tick, refreshes any enabled subscription whose `updateInterval`
+ * (hours) has elapsed since its `lastUpdate`. All three paths hand a
+ * subscription's fetched nodes to `replaceSubscriptionNodes`, which merges them
+ * into the list in place (subscription-merge.ts): its nodes stay where they
+ * are and keep their ids, so the selection survives a refresh (audit P0-3).
  *
- * The scheduler is intentionally framework-agnostic: it pulls current state via
- * getters and pushes results via callbacks so it can be driven from App.tsx
- * without coupling to the Zustand stores directly.
+ * This module is intentionally framework-agnostic: it pulls current state via
+ * getters and pushes results via callbacks, so it doesn't couple to the
+ * Zustand stores directly. subscription-refresh.ts binds the callbacks to them.
  */
 
-export interface AutoUpdateHooks {
-  getSubscriptions: () => Subscription[];
-  getNodes: () => ProxyNode[];
-  setNodes: (nodes: ProxyNode[]) => void;
+/** Where a refresh delivers its result. */
+export interface RefreshHooks {
+  /**
+   * Merge a subscription's freshly fetched nodes into the node list. The store
+   * reads the list at that moment rather than one captured before the fetch,
+   * so a manual refresh and a scheduler tick can't overwrite each other.
+   */
+  replaceSubscriptionNodes: (subscriptionId: string, nodes: ProxyNode[]) => void;
   onSubscriptionUpdated: (id: string, nodeCount: number) => void;
   onError?: (id: string, error: string) => void;
+}
+
+export interface AutoUpdateHooks extends RefreshHooks {
+  getSubscriptions: () => Subscription[];
 }
 
 const HOUR_MS = 60 * 60 * 1000;
@@ -32,8 +43,7 @@ const CHECK_INTERVAL_MS = 60 * 1000; // check once per minute
  * `lastUpdate` is only stamped on success, so `isDue` keeps returning true. A
  * subscription whose provider returns 403, or that yields zero nodes, then
  * re-fetches on every tick for as long as the app is open. That hammers the
- * provider and, because a successful refresh calls setNodes, it also re-renders
- * the UI repeatedly.
+ * provider.
  *
  * Module scope rather than inside the scheduler closure so that editing a
  * subscription can clear its penalty — see resetSubscriptionBackoff. Deliberately
@@ -62,10 +72,11 @@ function isDue(sub: Subscription, now: number): boolean {
 }
 
 /**
- * Refresh a single subscription and swap its nodes into the node list.
- * Exported so the scheduler and any manual trigger share identical behaviour.
+ * Refresh a single subscription and merge its nodes into the node list.
+ * Exported so the scheduler and the Update button share identical behaviour.
+ * A failed or empty fetch leaves the subscription's nodes as they are.
  */
-export async function refreshSubscription(sub: Subscription, hooks: AutoUpdateHooks): Promise<void> {
+export async function refreshSubscription(sub: Subscription, hooks: RefreshHooks): Promise<void> {
   const result = await fetchSubscription(sub);
   if (result.error) {
     hooks.onError?.(sub.id, result.error);
@@ -73,9 +84,43 @@ export async function refreshSubscription(sub: Subscription, hooks: AutoUpdateHo
   }
   if (result.nodes.length === 0) return;
 
-  const others = hooks.getNodes().filter((n) => n.subscriptionId !== sub.id);
-  hooks.setNodes([...others, ...result.nodes]);
+  hooks.replaceSubscriptionNodes(sub.id, result.nodes);
   hooks.onSubscriptionUpdated(sub.id, result.nodes.length);
+}
+
+/**
+ * "Update All": fetch every enabled subscription in parallel, then merge each
+ * one on its own.
+ *
+ * This used to rebuild the whole list from the manual nodes plus the fetches
+ * that succeeded. A provider that was briefly unreachable or returned nothing
+ * lost all its nodes, so did every disabled subscription and every node whose
+ * subscription had been deleted, and no error was shown (audit P0-3). Now a
+ * subscription that fails or returns no nodes keeps its nodes, a disabled one
+ * isn't fetched and keeps them too, and manual and orphaned nodes are never
+ * touched.
+ *
+ * Returns one message per subscription that was not updated, naming it, in
+ * the order of `subscriptions`. They are returned for the page to show, not
+ * passed to onError.
+ */
+export async function refreshAllSubscriptions(
+  subscriptions: Subscription[],
+  hooks: RefreshHooks
+): Promise<string[]> {
+  const results = await updateAllSubscriptions(subscriptions);
+  const errors: string[] = [];
+  for (const sub of subscriptions) {
+    const result = results.get(sub.id);
+    if (!result) continue; // disabled: not fetched
+    if (result.error || result.nodes.length === 0) {
+      errors.push(`${sub.name}: ${result.error || 'returned no nodes'}`);
+      continue;
+    }
+    hooks.replaceSubscriptionNodes(sub.id, result.nodes);
+    hooks.onSubscriptionUpdated(sub.id, result.nodes.length);
+  }
+  return errors;
 }
 
 /**

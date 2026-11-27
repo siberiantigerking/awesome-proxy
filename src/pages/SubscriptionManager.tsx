@@ -1,21 +1,44 @@
 import React, { useState } from 'react';
-import { Plus, Trash2, RefreshCw, ExternalLink, Clock, Package, AlertCircle, Edit3 } from '../components/Icons';
+import { Plus, Trash2, RefreshCw, ExternalLink, Clock, Package, AlertCircle, Edit3, QrCode } from '../components/Icons';
 import { useSubscriptionStore } from '../store/subscriptionStore';
 import { useNodeStore } from '../store/nodeStore';
-import { fetchSubscription, updateAllSubscriptions } from '../services/subscription-fetcher';
-import { resetSubscriptionBackoff } from '../services/auto-update';
+import { refreshAllSubscriptions, refreshSubscription, resetSubscriptionBackoff } from '../services/auto-update';
+import { storeRefreshHooks } from '../services/subscription-refresh';
 import { useConfirm } from '../components/ConfirmDialog';
+import PendingApplyBanner from '../components/PendingApplyBanner';
+// Type only: the dialog itself is loaded on demand (openShare).
+import type { ShareTarget } from '../components/ShareDialog';
 import type { Subscription } from '../types';
 
 export default function SubscriptionManager() {
   const { subscriptions, addSubscription, updateSubscription, removeSubscription, saveToStore } = useSubscriptionStore();
-  const { nodes, setNodes, removeNodesBySubscription } = useNodeStore();
+  const { nodes, removeNodesBySubscription } = useNodeStore();
   // null = closed, 'add' = new subscription, otherwise the subscription being edited.
   const [dialog, setDialog] = useState<'add' | Subscription | null>(null);
   const [updatingId, setUpdatingId] = useState<string | null>(null);
   const [updatingAll, setUpdatingAll] = useState(false);
-  const [updateError, setUpdateError] = useState<string | null>(null);
+  // One "<subscription>: <reason>" line per subscription that was not updated.
+  const [updateErrors, setUpdateErrors] = useState<string[]>([]);
   const { confirm, confirmDialog } = useConfirm();
+  // The share dialog, once its chunk has loaded, and what it shares.
+  const [share, setShare] = useState<{
+    Dialog: React.ComponentType<{ target: ShareTarget; onClose: () => void }>;
+    target: ShareTarget;
+  } | null>(null);
+  // Its own line: a share dialog that failed to load is not an update error.
+  const [shareError, setShareError] = useState<string | null>(null);
+
+  // Lazy, as on the Nodes page: the dialog's chunk holds the QR encoder and
+  // its library, so the main chunk only carries the button.
+  const openShare = async (target: ShareTarget) => {
+    setShareError(null);
+    try {
+      const { default: Dialog } = await import('../components/ShareDialog');
+      setShare({ Dialog, target });
+    } catch {
+      setShareError('Could not open the share dialog.');
+    }
+  };
 
   // Remove a subscription and all proxy nodes that were imported from it.
   //
@@ -68,52 +91,36 @@ export default function SubscriptionManager() {
     }
   };
 
+  // The scheduler's refresh path: the nodes are merged in place, so they keep
+  // their positions and ids and the selection survives, and a failed fetch
+  // leaves them as they are.
   const handleUpdateOne = async (sub: Subscription) => {
     setUpdatingId(sub.id);
-    setUpdateError(null);
+    setUpdateErrors([]);
     try {
-      const result = await fetchSubscription(sub);
       // Surface failures instead of silently doing nothing. Previously a failed
       // fetch (e.g. HTTP 403 from the provider's WAF) left the UI unchanged
       // with no explanation, which looked like "the import just doesn't work".
-      if (result.error) {
-        setUpdateError(`${sub.name}: ${result.error}`);
-      }
-      if (result.nodes.length > 0) {
-        // Remove old nodes from this subscription and add new ones
-        const otherNodes = nodes.filter((n) => n.subscriptionId !== sub.id);
-        setNodes([...otherNodes, ...result.nodes]);
-        updateSubscription(sub.id, {
-          lastUpdate: Date.now(),
-          nodeCount: result.nodes.length,
-        });
-      }
+      await refreshSubscription(
+        sub,
+        storeRefreshHooks((_, error) => setUpdateErrors([`${sub.name}: ${error}`]))
+      );
     } catch (err: any) {
       console.error('Failed to update subscription:', err);
-      setUpdateError(`${sub.name}: ${err?.message || 'Failed to update subscription.'}`);
+      setUpdateErrors([`${sub.name}: ${err?.message || 'Failed to update subscription.'}`]);
     } finally {
       setUpdatingId(null);
     }
   };
 
+  // Each subscription is merged on its own. One that fails, returns nothing or
+  // is disabled keeps its nodes and is listed in the banner; this used to drop
+  // them all without a word (audit P0-3).
   const handleUpdateAll = async () => {
     setUpdatingAll(true);
+    setUpdateErrors([]);
     try {
-      const results = await updateAllSubscriptions(subscriptions);
-      let allOtherNodes = nodes.filter((n) => !n.subscriptionId);
-      let allNewNodes = [...allOtherNodes];
-
-      for (const [subId, result] of results.entries()) {
-        if (result.nodes.length > 0) {
-          allNewNodes = [...allNewNodes, ...result.nodes];
-          updateSubscription(subId, {
-            lastUpdate: Date.now(),
-            nodeCount: result.nodes.length,
-          });
-        }
-      }
-
-      setNodes(allNewNodes);
+      setUpdateErrors(await refreshAllSubscriptions(subscriptions, storeRefreshHooks()));
     } catch (err) {
       console.error('Failed to update all subscriptions:', err);
     } finally {
@@ -146,11 +153,16 @@ export default function SubscriptionManager() {
         Manage subscription URLs to automatically import proxy nodes. Supports base64 and Clash YAML formats.
       </p>
 
-      {updateError && (
+      {updateErrors.length > 0 && (
         <div className="rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 flex items-start justify-between gap-3">
-          <p className="text-sm text-red-300 break-words">{updateError}</p>
+          <div className="min-w-0 space-y-1">
+            <p className="text-sm text-red-300">Not updated — their nodes were kept:</p>
+            {updateErrors.map((message, i) => (
+              <p key={i} className="text-sm text-red-300 break-words">{message}</p>
+            ))}
+          </div>
           <button
-            onClick={() => setUpdateError(null)}
+            onClick={() => setUpdateErrors([])}
             className="text-red-400 hover:text-red-200 text-xs shrink-0"
             aria-label="Dismiss error"
           >
@@ -158,6 +170,10 @@ export default function SubscriptionManager() {
           </button>
         </div>
       )}
+
+      {shareError && <p className="text-[11px] text-red-300">{shareError}</p>}
+
+      <PendingApplyBanner />
 
       {/* Subscription List */}
       <div className="space-y-3">
@@ -215,6 +231,13 @@ export default function SubscriptionManager() {
                   <Edit3 size={14} />
                 </button>
                 <button
+                  onClick={() => void openShare({ kind: 'subscription', subscription: sub })}
+                  className="btn-icon"
+                  title="Share URL"
+                >
+                  <QrCode size={14} />
+                </button>
+                <button
                   onClick={() => updateSubscription(sub.id, { enabled: !sub.enabled })}
                   className="btn-icon"
                   title={sub.enabled ? 'Disable' : 'Enable'}
@@ -252,6 +275,9 @@ export default function SubscriptionManager() {
           }}
         />
       )}
+
+      {/* Share Dialog */}
+      {share && <share.Dialog target={share.target} onClose={() => setShare(null)} />}
 
       {confirmDialog}
     </div>

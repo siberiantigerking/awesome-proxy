@@ -1,6 +1,6 @@
 import yaml from 'js-yaml';
 import type { Subscription, ProxyNode } from '../types';
-import { parseProxyLinks } from './node-parser';
+import { normalizeTransportType, parseProxyLinks } from './node-parser';
 
 /**
  * Fetch and parse a subscription URL into proxy nodes
@@ -76,7 +76,13 @@ function clashProxyToNode(proxy: any): ProxyNode | null {
   if (!proxy || typeof proxy !== 'object') return null;
 
   const rawType = String(proxy.type || '').toLowerCase();
-  const type = normalizeType(rawType);
+  const baseType = normalizeType(rawType);
+  // mihomo writes ShadowTLS as Shadowsocks with the shadow-tls plugin (`type:
+  // ss`, `plugin: shadow-tls`, the handshake settings in plugin-opts). As plain
+  // Shadowsocks such a node could never connect, so it becomes the app's
+  // ShadowTLS node, which carries the Shadowsocks credentials inside.
+  const shadowTlsPlugin = baseType === 'shadowsocks' && proxy.plugin === 'shadow-tls';
+  const type = shadowTlsPlugin ? 'shadowtls' : baseType;
   const server = proxy.server ? String(proxy.server) : '';
   const port = parseInt(proxy.port) || 0;
 
@@ -107,18 +113,30 @@ function clashProxyToNode(proxy: any): ProxyNode | null {
   const fp = proxy['client-fingerprint'];
   if (fp) node.fingerprint = String(fp);
 
-  // Transport
-  if (proxy.network) node.transportType = String(proxy.network) as ProxyNode['transportType'];
+  // Transport. Through the same normaliser as share links, so `h2` is the http
+  // (HTTP/2) transport and a transport sing-box lacks (xhttp, ...) keeps its
+  // name for the generator's skip reason.
+  if (proxy.network) node.transportType = normalizeTransportType(proxy.network);
   const wsOpts = proxy['ws-opts'];
   if (wsOpts && typeof wsOpts === 'object') {
     if (wsOpts.path) node.transportPath = String(wsOpts.path);
     if (wsOpts.headers && wsOpts.headers.Host) node.transportHost = String(wsOpts.headers.Host);
+    // mihomo spells HTTPUpgrade as ws with this flag; its path and Host stay in
+    // ws-opts (read above). Imported as plain ws, the node couldn't talk to its server.
+    if (node.transportType === 'ws' && wsOpts['v2ray-http-upgrade'] === true) node.transportType = 'httpupgrade';
   } else if (proxy['ws-path']) {
     node.transportPath = String(proxy['ws-path']);
   }
   const grpcOpts = proxy['grpc-opts'];
   if (grpcOpts && typeof grpcOpts === 'object' && grpcOpts['grpc-service-name']) {
     node.transportPath = String(grpcOpts['grpc-service-name']);
+  }
+  // HTTP/2 (`network: h2`): mihomo keeps the host, a list, and the path in h2-opts.
+  const h2Opts = proxy['h2-opts'];
+  if (node.transportType === 'http' && h2Opts && typeof h2Opts === 'object') {
+    const host = Array.isArray(h2Opts.host) ? h2Opts.host[0] : h2Opts.host;
+    if (host) node.transportHost = String(host);
+    if (h2Opts.path) node.transportPath = String(h2Opts.path);
   }
 
   // Protocol specifics
@@ -181,7 +199,20 @@ function clashProxyToNode(proxy: any): ProxyNode | null {
     node.tls = true;
   }
 
-  if (type === 'shadowtls') {
+  if (shadowTlsPlugin) {
+    // mihomo's shadow-tls plugin. The proxy's own cipher and password (read
+    // above) are the inner Shadowsocks credentials; the handshake's SNI,
+    // password and version are in plugin-opts. mihomo uses version 2 when
+    // plugin-opts gives none, so the import does too (the generator's own
+    // default is 3).
+    node.tls = true;
+    const opts = proxy['plugin-opts'] && typeof proxy['plugin-opts'] === 'object' ? proxy['plugin-opts'] : {};
+    if (opts.host) node.sni = String(opts.host);
+    if (opts.password) node.shadowTlsPassword = String(opts.password);
+    const v = opts.version === undefined || opts.version === null ? 2 : parseInt(opts.version);
+    if (v === 1 || v === 2 || v === 3) node.shadowTlsVersion = v;
+    if (opts['skip-cert-verify'] === true) node.allowInsecure = true;
+  } else if (type === 'shadowtls') {
     // Clash-style ShadowTLS: the outer handshake settings live alongside the
     // inner Shadowsocks credentials (`password`/`cipher`, already read above).
     node.tls = true;

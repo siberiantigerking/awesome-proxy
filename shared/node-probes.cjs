@@ -10,7 +10,8 @@
  *   clashDelay Real latency of an HTTP request carried THROUGH a specific
  *              outbound, measured by sing-box itself via the Clash API. This is
  *              the number that tells you the node works end to end. Needs the
- *              core running, but does NOT disturb the active selection.
+ *              core running (and its per-start Clash API port and secret, which
+ *              the caller passes in), but does NOT disturb the active selection.
  *
  *   udpProbe   Does UDP survive the tunnel? Performed by asking the local mixed
  *              inbound for a SOCKS5 UDP ASSOCIATE and running a real DNS query
@@ -31,7 +32,9 @@
 const net = require('net');
 const tls = require('tls');
 const dgram = require('dgram');
-const http = require('http');
+// The Clash API request itself (auth header, timeouts, body cap) lives in the
+// shared client, so the controller's address and secret stay in one module.
+const { clashDelayRequest } = require('./clash-client.cjs');
 
 // Cloudflare rather than Google throughout: cp.cloudflare.com is Cloudflare's
 // captive-portal endpoint (204, empty body, anycast everywhere) and is reachable
@@ -93,66 +96,21 @@ function tcpPing(host, port, timeout = 5000) {
 }
 
 /**
- * Ask sing-box to time an HTTP request through one specific outbound.
- * GET /proxies/{tag}/delay?timeout=<ms>&url=<probe url> -> { "delay": 123 }
+ * Ask sing-box to time an HTTP request through one specific outbound, via the
+ * Clash API's delay endpoint (see clashDelayRequest in clash-client.cjs).
  *
  * Returns ms, or -1 when the outbound can't reach the probe URL. A non-200 from
  * the Clash API is itself the "this node is dead" signal, so it maps to -1
  * rather than throwing.
+ *
+ * `port` and `secret` are the running core's Clash API credentials, which only
+ * the backend holds. There is deliberately no default port: the controller
+ * moves on every start, so a missing port means "no core" and gives -1.
  */
 function clashDelay(options = {}) {
-  const {
-    tag,
-    url = DEFAULT_DELAY_URL,
-    timeout = 5000,
-    host = '127.0.0.1',
-    port = 9090,
-  } = options;
-
-  return new Promise((resolve) => {
-    if (!tag) {
-      resolve(-1);
-      return;
-    }
-    const path =
-      '/proxies/' +
-      encodeURIComponent(tag) +
-      '/delay?timeout=' +
-      encodeURIComponent(String(timeout)) +
-      '&url=' +
-      encodeURIComponent(url);
-
-    const req = http.request(
-      { host, port, path, method: 'GET', timeout: timeout + 2000 },
-      (res) => {
-        let body = '';
-        res.setEncoding('utf8');
-        res.on('data', (chunk) => {
-          // Guard against a runaway response body.
-          if (body.length < 4096) body += chunk;
-        });
-        res.on('end', () => {
-          if (res.statusCode !== 200) {
-            resolve(-1);
-            return;
-          }
-          try {
-            const parsed = JSON.parse(body);
-            const delay = Number(parsed && parsed.delay);
-            resolve(Number.isFinite(delay) && delay >= 0 ? Math.round(delay) : -1);
-          } catch {
-            resolve(-1);
-          }
-        });
-      }
-    );
-    req.on('error', () => resolve(-1));
-    req.on('timeout', () => {
-      req.destroy();
-      resolve(-1);
-    });
-    req.end();
-  });
+  const { tag, url = DEFAULT_DELAY_URL, timeout = 5000, port, secret } = options;
+  if (!port) return Promise.resolve(-1);
+  return clashDelayRequest({ port, secret }, tag, url, timeout);
 }
 
 /**

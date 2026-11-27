@@ -1,4 +1,4 @@
-import type { ProxyNode, ProxyProtocol } from '../types';
+import type { KnownTransport, ProxyNode, ProxyProtocol } from '../types';
 import { decodeBase64Utf8 } from './node-link';
 
 /**
@@ -22,7 +22,11 @@ export function parseProxyLink(link: string): ProxyNode | null {
     if (link.startsWith('anytls://')) return parseAnytls(link);
     return null;
   } catch (err) {
-    console.error('Failed to parse proxy link:', link, err);
+    // Never log the link: a share link is a credential, and so is an error
+    // message that quotes it (V8's JSON.parse errors quote their input). The
+    // scheme and the error's name are enough to tell what failed.
+    const scheme = link.slice(0, link.indexOf('://'));
+    console.error(`Failed to parse a ${scheme}:// link (${err instanceof Error ? err.name : typeof err}).`);
     return null;
   }
 }
@@ -68,6 +72,42 @@ function generateId(): string {
   return Date.now().toString(36) + Math.random().toString(36).substr(2, 9);
 }
 
+// ==================== Transports ====================
+/*
+ * The renderer's copy of the transport rules in shared/config-generator.cjs.
+ * Links and Clash YAML are stored through normalizeTransportType, and the node
+ * form uses SUPPORTED_TRANSPORTS to mark a transport the generator will skip,
+ * while the generator normalises every node again with its own copy before it
+ * builds or rejects a transport. So both copies MUST agree on every value.
+ * tests/unit/transports.test.ts enforces the parity; change both copies
+ * together.
+ */
+
+/** The transports sing-box has for VMess, VLESS and Trojan (`tcp` = no transport block). */
+export const SUPPORTED_TRANSPORTS: ReadonlySet<string> = new Set<KnownTransport>([
+  'tcp',
+  'ws',
+  'grpc',
+  'http',
+  'quic',
+  'httpupgrade',
+]);
+
+/**
+ * One spelling per transport, whatever the link, the YAML or a stored node says:
+ * trimmed and lower-cased; empty, `raw` (Xray's newer name for TCP) and `none`
+ * are `tcp`, so nodes stored with them keep working as the plain TCP they
+ * always were; `h2` is the http (HTTP/2) transport. Any other name is kept: it
+ * is a transport sing-box lacks (xhttp, kcp, ...), and the generator skips such
+ * a node with a reason instead of emitting plain TCP that can never connect.
+ */
+export function normalizeTransportType(value: unknown): KnownTransport | (string & {}) {
+  const type = String(value ?? '').trim().toLowerCase();
+  if (type === '' || type === 'tcp' || type === 'raw' || type === 'none') return 'tcp';
+  if (type === 'h2') return 'http';
+  return type;
+}
+
 // ==================== VMess ====================
 function parseVmess(link: string): ProxyNode | null {
   // vmess://base64(json)
@@ -93,7 +133,13 @@ function parseVmess(link: string): ProxyNode | null {
     security: json.scy || 'auto',
     tls: json.tls === 'tls',
     sni: json.sni || json.host || '',
-    transportType: json.net === 'ws' ? 'ws' : json.net === 'grpc' ? 'grpc' : json.net === 'h2' ? 'http' : 'tcp',
+    // uTLS fingerprint, which buildProxyLink writes as `fp` too. Left out, not
+    // '', when the link has none: a refresh compares nodes as JSON
+    // (subscription-merge), so a new '' on every node would count as a change.
+    fingerprint: json.fp ? String(json.fp) : undefined,
+    // Through the normaliser, so httpupgrade, quic, kcp or xhttp are no longer
+    // all silently stored as tcp.
+    transportType: normalizeTransportType(json.net),
     transportPath: json.path || '',
     transportHost: json.host || '',
     country: extractCountryFromName(json.ps),
@@ -156,13 +202,35 @@ function parseUri(link: string, defaultPort = 443): UriParts | null {
   const slashIdx = authority.indexOf('/');
   if (slashIdx !== -1) authority = authority.slice(0, slashIdx);
 
-  // Host + port. Handle IPv6 literals: [2606:4700::1]:443
-  let host = '';
+  // Host + port, IPv6 literals included: [2606:4700::1]:443
+  const address = splitHostPort(authority, defaultPort);
+  if (!address || !address.host) return null;
+  const { host, port } = address;
+
+  let params: URLSearchParams;
+  try {
+    params = new URLSearchParams(query);
+  } catch {
+    params = new URLSearchParams();
+  }
+
+  return { userinfo, host, port, params, fragment };
+}
+
+/**
+ * Split `host[:port]` or `[ipv6][:port]`. An IPv6 host comes back WITHOUT its
+ * brackets, the bare address a node holds when it comes from a vmess payload,
+ * Clash YAML or the node form; formatHost (node-link.ts) puts them back when it
+ * builds a link. Links used to keep them, so such a node came back from its own
+ * link with a different server. Returns null for an unclosed bracket.
+ */
+function splitHostPort(authority: string, defaultPort: number): { host: string; port: number } | null {
+  let host = authority;
   let port = defaultPort;
   if (authority.startsWith('[')) {
     const close = authority.indexOf(']');
     if (close === -1) return null;
-    host = authority.slice(0, close + 1); // keep brackets for IPv6
+    host = authority.slice(1, close);
     const after = authority.slice(close + 1);
     if (after.startsWith(':')) {
       const p = parseInt(after.slice(1));
@@ -174,21 +242,18 @@ function parseUri(link: string, defaultPort = 443): UriParts | null {
       host = authority.slice(0, colonIdx);
       const p = parseInt(authority.slice(colonIdx + 1));
       if (p) port = p;
-    } else {
-      host = authority;
     }
   }
+  return { host, port };
+}
 
-  if (!host) return null;
-
-  let params: URLSearchParams;
-  try {
-    params = new URLSearchParams(query);
-  } catch {
-    params = new URLSearchParams();
-  }
-
-  return { userinfo, host, port, params, fragment };
+/**
+ * The name of a node whose link has none: `host:port`, with an IPv6 host in
+ * brackets as the link wrote it, so that name reads as it did before hosts
+ * lost their brackets (a refresh pairs nodes by name first).
+ */
+function hostPortLabel(host: string, port: number): string {
+  return host.includes(':') ? `[${host}]:${port}` : `${host}:${port}`;
 }
 
 /**
@@ -222,7 +287,7 @@ function parseVless(link: string): ProxyNode | null {
   if (!uri || !uri.userinfo) return null;
   const { host: server, port, params } = uri;
   const uuid = decodeSecret(uri.userinfo);
-  const name = decodeName(uri.fragment, `${server}:${port}`);
+  const name = decodeName(uri.fragment, hostPortLabel(server, port));
 
   const security = params.get('security');
   const isReality = security === 'reality';
@@ -240,7 +305,10 @@ function parseVless(link: string): ProxyNode | null {
     fingerprint: params.get('fp') || '',
     realityPublicKey: isReality ? (params.get('pbk') || '') : undefined,
     realityShortId: isReality ? (params.get('sid') || '') : undefined,
-    transportType: (params.get('type') as any) || 'tcp',
+    // Only when set, like vmess's fingerprint: a new `false` on every node
+    // would make the next refresh report them all as changed.
+    allowInsecure: params.get('allowInsecure') === '1' || params.get('insecure') === '1' ? true : undefined,
+    transportType: normalizeTransportType(params.get('type')),
     transportPath: params.get('path') || params.get('serviceName') || '',
     transportHost: params.get('host') || '',
     country: extractCountryFromName(name),
@@ -254,7 +322,7 @@ function parseTrojan(link: string): ProxyNode | null {
   if (!uri || !uri.userinfo) return null;
   const { host: server, port, params } = uri;
   const password = decodeSecret(uri.userinfo);
-  const name = decodeName(uri.fragment, `${server}:${port}`);
+  const name = decodeName(uri.fragment, hostPortLabel(server, port));
 
   return {
     id: generateId(),
@@ -265,8 +333,13 @@ function parseTrojan(link: string): ProxyNode | null {
     password,
     tls: true,
     sni: params.get('sni') || params.get('host') || server,
-    transportType: (params.get('type') as any) || 'tcp',
-    transportPath: params.get('path') || '',
+    transportType: normalizeTransportType(params.get('type')),
+    // As for VMess and VLESS: the path, or gRPC's service name, which links
+    // carry as `serviceName`.
+    transportPath: params.get('path') || params.get('serviceName') || '',
+    // The ws / httpupgrade Host header (it also stands in for a missing sni,
+    // above). Left out when the link has no host, like vmess's fingerprint.
+    transportHost: params.get('host') || undefined,
     allowInsecure: params.get('allowInsecure') === '1' || params.get('insecure') === '1',
     country: extractCountryFromName(name),
   };
@@ -274,63 +347,85 @@ function parseTrojan(link: string): ProxyNode | null {
 
 // ==================== Shadowsocks ====================
 function parseShadowsocks(link: string): ProxyNode | null {
-  // ss://base64(method:password)@server:port#name
-  // or ss://base64(method:password@server:port)#name
-  const rest = link.replace('ss://', '');
-  const hashIndex = rest.indexOf('#');
-  const name = hashIndex !== -1 ? decodeURIComponent(rest.slice(hashIndex + 1)) : '';
-  const main = hashIndex !== -1 ? rest.slice(0, hashIndex) : rest;
+  // SIP002: ss://base64(method:password)@server:port[/][?plugin=...][#name]
+  // Legacy: ss://base64(method:password@server:port)[#name]
+  // The name and the query come off first, in both forms, so neither can be
+  // mistaken for part of the address. Splitting the rest at ':' used to break
+  // an IPv6 host and drop `?plugin=`.
+  const rest = link.slice('ss://'.length);
+  const hashIdx = rest.indexOf('#');
+  const fragment = hashIdx === -1 ? '' : rest.slice(hashIdx + 1);
+  const beforeHash = hashIdx === -1 ? rest : rest.slice(0, hashIdx);
+  const qIdx = beforeHash.indexOf('?');
+  const params = new URLSearchParams(qIdx === -1 ? '' : beforeHash.slice(qIdx + 1));
+  const body = qIdx === -1 ? beforeHash : beforeHash.slice(0, qIdx);
 
-  let method: string, password: string, server: string, port: number;
+  let methodPass: string, server: string, port: number;
 
-  const atIndex = main.indexOf('@');
-  if (atIndex !== -1) {
-    // user-info@host format
-    const userInfo = main.slice(0, atIndex);
-    const hostPart = main.slice(atIndex + 1);
+  if (body.includes('@')) {
+    // SIP002, through the URI parser the other schemes use, so an IPv6 host
+    // ([2001:db8::1]:8388) parses. The userinfo is base64 and holds no '@'.
+    const uri = parseUri(link);
+    if (!uri || !uri.userinfo) return null;
     try {
       // SIP002 links commonly use the URL-safe alphabet with no padding, which
       // plain `atob` refuses — those links used to fail to import at all.
-      const decoded = decodeBase64Utf8(userInfo);
-      const colonIndex = decoded.indexOf(':');
-      method = decoded.slice(0, colonIndex);
-      password = decoded.slice(colonIndex + 1);
+      methodPass = decodeBase64Utf8(uri.userinfo);
     } catch {
       return null;
     }
-    const [host, portStr] = hostPart.split(':');
-    server = host;
-    port = parseInt(portStr) || 443;
+    server = uri.host;
+    port = uri.port;
   } else {
-    // Entire thing is base64
+    // Legacy: everything before the name and query is base64.
+    let decoded: string;
     try {
-      const decoded = decodeBase64Utf8(main);
-      // method:password@server:port
-      const atIdx = decoded.lastIndexOf('@');
-      if (atIdx === -1) return null;
-      const methodPass = decoded.slice(0, atIdx);
-      const hostPort = decoded.slice(atIdx + 1);
-      const colonIdx = methodPass.indexOf(':');
-      method = methodPass.slice(0, colonIdx);
-      password = methodPass.slice(colonIdx + 1);
-      const [h, p] = hostPort.split(':');
-      server = h;
-      port = parseInt(p) || 443;
+      decoded = decodeBase64Utf8(body);
     } catch {
       return null;
     }
+    // method:password@server:port, split at the last '@' (a password may hold one).
+    const atIdx = decoded.lastIndexOf('@');
+    if (atIdx === -1) return null;
+    const address = splitHostPort(decoded.slice(atIdx + 1), 443);
+    if (!address) return null;
+    methodPass = decoded.slice(0, atIdx);
+    server = address.host;
+    port = address.port;
   }
+
+  const colonIdx = methodPass.indexOf(':');
+  const method = methodPass.slice(0, colonIdx);
+  const password = methodPass.slice(colonIdx + 1);
+  const name = decodeName(fragment, '');
 
   return {
     id: generateId(),
-    name: name || `${server}:${port}`,
+    name: name || hostPortLabel(server, port),
     type: 'shadowsocks',
     server,
     port,
     method,
     password,
+    ...parseSsPlugin(params.get('plugin')),
     country: extractCountryFromName(name),
   };
+}
+
+/**
+ * The SIP003 plugin of a SIP002 link: `plugin=<name>[;<options>]`, as in
+ * `obfs-local;obfs=http;obfs-host=example.com`. Only the two plugins sing-box
+ * has are kept (its docs: "Only obfs-local and v2ray-plugin are supported");
+ * a link naming another one imports without a plugin, as it always did. Both
+ * fields are left out when the link has none, like vmess's fingerprint.
+ */
+function parseSsPlugin(value: string | null): Pick<ProxyNode, 'plugin' | 'pluginOpts'> {
+  if (!value) return {};
+  const semi = value.indexOf(';');
+  const plugin = semi === -1 ? value : value.slice(0, semi);
+  if (plugin !== 'obfs-local' && plugin !== 'v2ray-plugin') return {};
+  const pluginOpts = semi === -1 ? '' : value.slice(semi + 1);
+  return pluginOpts ? { plugin, pluginOpts } : { plugin };
 }
 
 // ==================== Hysteria2 ====================
@@ -340,7 +435,7 @@ function parseHysteria2(link: string): ProxyNode | null {
   if (!uri || !uri.userinfo) return null;
   const { host: server, port, params } = uri;
   const password = decodeSecret(uri.userinfo);
-  const name = decodeName(uri.fragment, `${server}:${port}`);
+  const name = decodeName(uri.fragment, hostPortLabel(server, port));
 
   // QUIC obfuscation. The official hysteria2 URI scheme uses `obfs` for the
   // type and `obfs-password` for the secret; some generators use `obfsParam`.
@@ -392,7 +487,7 @@ function parseTuic(link: string): ProxyNode | null {
   const uri = parseUri(link);
   if (!uri || !uri.userinfo) return null;
   const { host: server, port, params } = uri;
-  const name = decodeName(uri.fragment, `${server}:${port}`);
+  const name = decodeName(uri.fragment, hostPortLabel(server, port));
 
   const colonIdx = uri.userinfo.indexOf(':');
   let uuid = uri.userinfo;
@@ -439,7 +534,7 @@ function parseAnytls(link: string): ProxyNode | null {
   const uri = parseUri(link);
   if (!uri || !uri.userinfo) return null;
   const { host: server, port, params } = uri;
-  const name = decodeName(uri.fragment, `${server}:${port}`);
+  const name = decodeName(uri.fragment, hostPortLabel(server, port));
 
   let password = uri.userinfo;
   try {

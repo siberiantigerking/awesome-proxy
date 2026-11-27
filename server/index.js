@@ -7,7 +7,7 @@ const express = require('express');
 const cors = require('cors');
 const http = require('http');
 const { WebSocketServer, WebSocket } = require('ws');
-const { spawn, exec } = require('child_process');
+const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const net = require('net');
@@ -15,6 +15,18 @@ const { generateSingboxConfig } = require('../shared/config-generator.cjs');
 // Node test probes, shared with the Electron main process so both modes report
 // identical numbers.
 const { tcpPing, clashDelay, udpProbe, speedProbe } = require('../shared/node-probes.cjs');
+// sing-box version probe, shared with the Electron main process (compat R1).
+const { createCoreVersionProbe } = require('../shared/core-version.cjs');
+// The one Clash API client (audit P0-1), shared with the Electron main process.
+const {
+  createClashApiCredentials,
+  writeConfigWithClashApi,
+  isControllerListenError,
+  clashSelect,
+  clashConnectionTotals,
+} = require('../shared/clash-client.cjs');
+// Crash-safe Windows system proxy (audit P0-2), shared with the Electron main process.
+const { createSystemProxy } = require('../shared/system-proxy.cjs');
 
 const isValidPort = (port) => Number.isInteger(port) && port >= 1 && port <= 65535;
 
@@ -148,145 +160,234 @@ function addLog(message) {
 }
 
 // ==================== sing-box Management ====================
-function startSingbox(configPath) {
+// Mirrors electron/main.ts: the Clash API gets a random loopback port and a
+// per-start secret (audit P0-1), written into CONFIG_FILE right before each
+// spawn. Held only here — never sent to the browser and never logged.
+let clashApi = null;
+
+// Set by every stopSingbox(); a start pausing before its controller-port retry
+// gives up when it sees this.
+let stopRequested = false;
+
+const CONTROLLER_RETRY_DELAY_MS = 800;
+
+// Always the server's own config file: it is rewritten before every spawn, so
+// accepting a caller-supplied path would turn the start route into a write
+// primitive.
+async function startSingbox() {
+  const configPath = CONFIG_FILE;
+  // isConnecting covers the async gaps (credential allocation, retry pause)
+  // in which singboxProcess is still null.
+  if (singboxProcess || isConnecting) {
+    return { success: false, error: 'sing-box is already running' };
+  }
+  stopRequested = false;
+
+  const singboxPath = getSingboxPath();
+
+  if (!fs.existsSync(configPath)) {
+    const errorMsg = 'Config file not found at: ' + configPath;
+    addLog('ERROR: ' + errorMsg);
+    return { success: false, error: errorMsg };
+  }
+
+  // Check binary exists
+  if (singboxPath !== 'sing-box' && !fs.existsSync(singboxPath)) {
+    const errorMsg = 'sing-box binary not found at: ' + singboxPath + '. Please place sing-box.exe in resources/bin/';
+    addLog('ERROR: ' + errorMsg);
+    return { success: false, error: errorMsg };
+  }
+
+  isConnecting = true;
+  let attempt = await attemptCoreStart(singboxPath, configPath);
+
+  if (attempt.controllerPortBusy) {
+    // Something grabbed the port between picking it and sing-box binding it:
+    // new port, new secret, exactly one more try.
+    addLog("sing-box couldn't open its local control port (127.0.0.1:" + attempt.port + '); retrying on another port.');
+    await new Promise((r) => setTimeout(r, CONTROLLER_RETRY_DELAY_MS));
+    if (stopRequested) {
+      isConnecting = false;
+      broadcast('singbox:status-change', 'disconnected');
+      return { success: false, error: 'Connecting was cancelled.' };
+    }
+    attempt = await attemptCoreStart(singboxPath, configPath);
+    if (attempt.controllerPortBusy) {
+      const errorMsg =
+        "sing-box couldn't open its local control port (127.0.0.1:" + attempt.port + ') because another program is using it. ' +
+        'Close that program and connect again.';
+      addLog('ERROR: ' + errorMsg);
+      isConnecting = false;
+      broadcast('singbox:status-change', 'disconnected');
+      return { success: false, error: errorMsg };
+    }
+  }
+
+  if (!attempt.success && !singboxProcess) isConnecting = false;
+  return attempt.success ? { success: true } : { success: false, error: attempt.error };
+}
+
+async function attemptCoreStart(singboxPath, configPath) {
+  let creds;
+  try {
+    creds = await createClashApiCredentials();
+    writeConfigWithClashApi(configPath, creds);
+  } catch (err) {
+    const errorMsg = 'Could not prepare the sing-box config: ' + err.message;
+    addLog('ERROR: ' + errorMsg);
+    return { success: false, error: errorMsg };
+  }
+  clashApi = creds;
+  addLog('Starting sing-box core...');
+
   return new Promise((resolve) => {
-    if (singboxProcess) {
-      resolve({ success: false, error: 'sing-box is already running' });
-      return;
-    }
-
-    const singboxPath = getSingboxPath();
-
-    if (!fs.existsSync(configPath)) {
-      const errorMsg = 'Config file not found at: ' + configPath;
-      addLog('ERROR: ' + errorMsg);
-      resolve({ success: false, error: errorMsg });
-      return;
-    }
-
-    // Check binary exists
-    if (singboxPath !== 'sing-box' && !fs.existsSync(singboxPath)) {
-      const errorMsg = 'sing-box binary not found at: ' + singboxPath + '. Please place sing-box.exe in resources/bin/';
-      addLog('ERROR: ' + errorMsg);
-      resolve({ success: false, error: errorMsg });
-      return;
-    }
-
-    isConnecting = true;
-    addLog('Starting sing-box core...');
-
+    let child;
     try {
-      singboxProcess = spawn(singboxPath, ['run', '-c', configPath], {
+      child = spawn(singboxPath, ['run', '-c', configPath], {
         windowsHide: true,
         stdio: ['pipe', 'pipe', 'pipe'],
       });
-
-      let started = false;
-      let startupTimer;
-      const recentLines = [];
-      const STARTED_RE = /sing-box started|server started/i;
-
-      const markStarted = () => {
-        if (started) return;
-        started = true;
-        isConnecting = false;
-        broadcast('singbox:status-change', 'connected');
-        resolve({ success: true });
-        if (startupTimer) clearTimeout(startupTimer);
-      };
-
-      const handleLine = (line) => {
-        addLog(line);
-        recentLines.push(line);
-        if (recentLines.length > 8) recentLines.shift();
-        if (!started && STARTED_RE.test(line)) markStarted();
-      };
-
-      singboxProcess.stdout.on('data', (data) => {
-        data.toString().split('\n').filter((l) => l.trim()).forEach(handleLine);
-      });
-
-      singboxProcess.stderr.on('data', (data) => {
-        data.toString().split('\n').filter((l) => l.trim()).forEach(handleLine);
-      });
-
-      singboxProcess.on('error', (err) => {
-        addLog('ERROR: Process error - ' + err.message);
-        singboxProcess = null;
-        isConnecting = false;
-        broadcast('singbox:status-change', 'disconnected');
-        if (!started) {
-          if (startupTimer) clearTimeout(startupTimer);
-          resolve({ success: false, error: err.message });
-        }
-      });
-
-      singboxProcess.on('exit', (code, signal) => {
-        addLog('sing-box exited with code ' + code + ', signal ' + signal);
-        singboxProcess = null;
-        isConnecting = false;
-        broadcast('singbox:status-change', 'disconnected');
-        if (!started) {
-          if (startupTimer) clearTimeout(startupTimer);
-          const errLines = recentLines.filter((l) => /fatal|error/i.test(l)).slice(-3).join(' | ')
-            || recentLines.slice(-3).join(' | ')
-            || ('exited with code ' + code);
-          resolve({ success: false, error: 'sing-box failed to start: ' + errLines });
-        }
-      });
-
-      startupTimer = setTimeout(() => {
-        if (!started) {
-          isConnecting = false;
-          if (singboxProcess) {
-            markStarted();
-          } else {
-            resolve({ success: false, error: 'sing-box startup timed out' });
-          }
-        }
-      }, 12000);
+      singboxProcess = child;
     } catch (err) {
       addLog('ERROR: Failed to start sing-box - ' + err.message);
       singboxProcess = null;
+      clashApi = null;
       isConnecting = false;
       resolve({ success: false, error: err.message });
+      return;
     }
+
+    let started = false;
+    let controllerPortBusy = false;
+    let startupTimer;
+    const recentLines = [];
+    const STARTED_RE = /sing-box started|server started/i;
+
+    // Child guard: only touch global core state while this child is still the
+    // core, so a late exit from an earlier, killed core can't clobber the next.
+    const isCurrent = () => singboxProcess === child;
+
+    const markStarted = () => {
+      if (started) return;
+      started = true;
+      isConnecting = false;
+      broadcast('singbox:status-change', 'connected');
+      resolve({ success: true });
+      if (startupTimer) clearTimeout(startupTimer);
+    };
+
+    const handleLine = (line) => {
+      addLog(line);
+      recentLines.push(line);
+      if (recentLines.length > 8) recentLines.shift();
+      if (!started && isControllerListenError(line)) controllerPortBusy = true;
+      if (!started && STARTED_RE.test(line) && isCurrent()) markStarted();
+    };
+
+    child.stdout.on('data', (data) => {
+      data.toString().split('\n').filter((l) => l.trim()).forEach(handleLine);
+    });
+
+    child.stderr.on('data', (data) => {
+      data.toString().split('\n').filter((l) => l.trim()).forEach(handleLine);
+    });
+
+    child.on('error', (err) => {
+      addLog('ERROR: Process error - ' + err.message);
+      if (isCurrent()) {
+        singboxProcess = null;
+        clashApi = null;
+        isConnecting = false;
+        broadcast('singbox:status-change', 'disconnected');
+      }
+      if (!started) {
+        if (startupTimer) clearTimeout(startupTimer);
+        resolve({ success: false, error: err.message });
+      }
+    });
+
+    child.on('exit', (code, signal) => {
+      addLog('sing-box exited with code ' + code + ', signal ' + signal);
+      // A controller-port race is retried by startSingbox, which reports
+      // "disconnected" itself only if it gives up.
+      const retryable = !started && controllerPortBusy;
+      if (isCurrent()) {
+        singboxProcess = null;
+        clashApi = null;
+        if (!retryable) {
+          isConnecting = false;
+          broadcast('singbox:status-change', 'disconnected');
+        }
+      }
+      if (!started) {
+        if (startupTimer) clearTimeout(startupTimer);
+        if (retryable) {
+          resolve({ success: false, controllerPortBusy: true, port: creds.port });
+          return;
+        }
+        const errLines = recentLines.filter((l) => /fatal|error/i.test(l)).slice(-3).join(' | ')
+          || recentLines.slice(-3).join(' | ')
+          || ('exited with code ' + code);
+        resolve({ success: false, error: 'sing-box failed to start: ' + errLines });
+      }
+    });
+
+    startupTimer = setTimeout(() => {
+      if (!started) {
+        if (isCurrent()) {
+          markStarted();
+        } else {
+          if (!singboxProcess) isConnecting = false;
+          resolve({ success: false, error: 'sing-box startup timed out' });
+        }
+      }
+    }, 12000);
   });
 }
 
 function stopSingbox() {
+  stopRequested = true;
   return new Promise((resolve) => {
-    if (!singboxProcess) {
+    const child = singboxProcess;
+    if (!child) {
       resolve({ success: true });
       return;
     }
 
     addLog('Stopping sing-box core...');
+    let settled = false;
 
     const timeout = setTimeout(() => {
-      if (singboxProcess) {
-        singboxProcess.kill('SIGKILL');
+      settled = true;
+      if (singboxProcess === child) {
+        child.kill('SIGKILL');
         singboxProcess = null;
+        clashApi = null;
       }
-      broadcast('singbox:status-change', 'disconnected');
+      if (!singboxProcess) broadcast('singbox:status-change', 'disconnected');
       resolve({ success: true });
     }, 5000);
 
-    singboxProcess.on('exit', () => {
+    child.on('exit', () => {
       clearTimeout(timeout);
-      singboxProcess = null;
-      broadcast('singbox:status-change', 'disconnected');
+      if (settled) return;
+      settled = true;
+      if (singboxProcess === child) {
+        singboxProcess = null;
+        clashApi = null;
+      }
+      if (!singboxProcess) broadcast('singbox:status-change', 'disconnected');
       addLog('sing-box stopped.');
       resolve({ success: true });
     });
 
-    singboxProcess.kill('SIGTERM');
+    child.kill('SIGTERM');
   });
 }
 
 // ==================== Traffic Monitoring ====================
-// Poll sing-box's Clash API (enabled in the generated config on
-// 127.0.0.1:9090) and derive per-second speed from the cumulative counters.
+// Poll sing-box's Clash API (on the running core's per-start port, see
+// clashApi) and derive per-second speed from the cumulative counters.
 let trafficInterval = null;
 
 function startTrafficMonitoring() {
@@ -296,34 +397,22 @@ function startTrafficMonitoring() {
   let primed = false;
 
   trafficInterval = setInterval(() => {
-    if (!singboxProcess) return;
-    const req = http.get(
-      { host: '127.0.0.1', port: 9090, path: '/connections', timeout: 2000 },
-      (res) => {
-        let body = '';
-        res.on('data', (chunk) => (body += chunk));
-        res.on('end', () => {
-          try {
-            const data = JSON.parse(body);
-            const totalUp = data.uploadTotal || 0;
-            const totalDown = data.downloadTotal || 0;
-            if (primed) {
-              broadcast('singbox:traffic', {
-                up: Math.max(0, totalUp - lastUp),
-                down: Math.max(0, totalDown - lastDown),
-              });
-            }
-            lastUp = totalUp;
-            lastDown = totalDown;
-            primed = true;
-          } catch {
-            // ignore malformed responses
-          }
+    if (!singboxProcess || !clashApi) return;
+    clashConnectionTotals(clashApi).then((totals) => {
+      // Not ready yet or a malformed response: skip this tick.
+      if (!totals) return;
+      const totalUp = totals.uploadTotal;
+      const totalDown = totals.downloadTotal;
+      if (primed) {
+        broadcast('singbox:traffic', {
+          up: Math.max(0, totalUp - lastUp),
+          down: Math.max(0, totalDown - lastDown),
         });
       }
-    );
-    req.on('error', () => {});
-    req.on('timeout', () => req.destroy());
+      lastUp = totalUp;
+      lastDown = totalDown;
+      primed = true;
+    });
   }, 1000);
 }
 
@@ -371,67 +460,36 @@ function isUrlSafe(url) {
 }
 
 // ==================== System Proxy ====================
-function sanitizeHost(host) {
-  if (!/^[a-zA-Z0-9.\-:]+$/.test(host)) {
-    throw new Error('Invalid host: ' + host);
-  }
-  return host;
-}
+// Registry logic is shared with the Electron main process (audit P0-2): a
+// snapshot is saved before every enable and put back on disable / the next
+// start, only while the proxy is still ours. The marker lives in its own file,
+// which /api/store doesn't serve, so a page can't forge what gets restored.
+const SYSTEM_PROXY_MARKER_FILE = path.join(CONFIG_DIR, 'system-proxy-ownership.json');
 
-function enableSystemProxy(host, port) {
-  return new Promise((resolve) => {
-    host = sanitizeHost(host);
-    if (!Number.isInteger(port) || port < 1 || port > 65535) {
-      addLog('Invalid proxy port');
-      resolve(false);
-      return;
-    }
-    const proxyServer = host + ':' + port;
-    const regCommand = 'reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v ProxyEnable /t REG_DWORD /d 1 /f && reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v ProxyServer /t REG_SZ /d "' + proxyServer + '" /f';
-    exec(regCommand, (error) => {
-      if (error) {
-        addLog('Failed to enable system proxy: ' + error.message);
-        resolve(false);
-      } else {
-        addLog('System proxy enabled: ' + host + ':' + port);
-        resolve(true);
+const systemProxy = createSystemProxy({
+  markerStore: {
+    get() {
+      try {
+        return JSON.parse(fs.readFileSync(SYSTEM_PROXY_MARKER_FILE, 'utf-8'));
+      } catch {
+        return null;
       }
-    });
-  });
-}
-
-function disableSystemProxy() {
-  return new Promise((resolve) => {
-    const regCommand = 'reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v ProxyEnable /t REG_DWORD /d 0 /f';
-    exec(regCommand, (error) => {
-      if (error) {
-        addLog('Failed to disable system proxy: ' + error.message);
-        resolve(false);
-      } else {
-        addLog('System proxy disabled');
-        resolve(true);
-      }
-    });
-  });
-}
-
-function getSystemProxyStatus() {
-  return new Promise((resolve) => {
-    exec('reg query "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v ProxyEnable', (error, stdout) => {
-      const enabled = (stdout || '').includes('0x1');
-      exec('reg query "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v ProxyServer', (_err, out) => {
-        const match = (out || '').match(/ProxyServer\s+REG_SZ\s+(.+)/);
-        resolve({ enabled, server: match ? match[1].trim() : '' });
-      });
-    });
-  });
-}
+    },
+    set(marker) {
+      fs.writeFileSync(SYSTEM_PROXY_MARKER_FILE, JSON.stringify(marker, null, 2), 'utf-8');
+    },
+    clear() {
+      fs.rmSync(SYSTEM_PROXY_MARKER_FILE, { force: true });
+    },
+  },
+  log: addLog,
+});
 
 // ==================== REST API ====================
 
-app.post('/api/singbox/start', async (req, res) => {
-  const configPath = req.body.configPath || CONFIG_FILE;
-  const result = await startSingbox(configPath);
+// start / restart ignore req.body.configPath: see startSingbox.
+app.post('/api/singbox/start', async (_req, res) => {
+  const result = await startSingbox();
   if (result.success) startTrafficMonitoring();
   res.json(result);
 });
@@ -441,11 +499,10 @@ app.post('/api/singbox/stop', async (_req, res) => {
   res.json(await stopSingbox());
 });
 
-app.post('/api/singbox/restart', async (req, res) => {
-  const configPath = req.body.configPath || CONFIG_FILE;
+app.post('/api/singbox/restart', async (_req, res) => {
   stopTrafficMonitoring();
   await stopSingbox();
-  const result = await startSingbox(configPath);
+  const result = await startSingbox();
   if (result.success) startTrafficMonitoring();
   res.json(result);
 });
@@ -454,15 +511,8 @@ app.get('/api/singbox/status', (_req, res) => {
   res.json({ status: isConnecting ? 'connecting' : (singboxProcess ? 'connected' : 'disconnected') });
 });
 
-app.get('/api/singbox/version', (_req, res) => {
-  const singboxPath = getSingboxPath();
-  exec('"' + singboxPath + '" version', (error, stdout) => {
-    if (error) res.json({ version: 'Not found' });
-    else {
-      const match = (stdout || '').match(/sing-box version (\S+)/);
-      res.json({ version: match ? match[1] : (stdout || '').trim() });
-    }
-  });
+app.get('/api/singbox/version', async (_req, res) => {
+  res.json({ version: (await coreVersionProbe.get()) ?? 'Not found' });
 });
 
 app.get('/api/singbox/logs', (_req, res) => {
@@ -475,34 +525,13 @@ app.post('/api/singbox/clear-logs', (_req, res) => {
 });
 
 // Live-switch a selector's active outbound via the Clash API (no restart).
-app.post('/api/singbox/select', (req, res) => {
+app.post('/api/singbox/select', async (req, res) => {
   const { selector, outbound } = req.body || {};
   if (typeof selector !== 'string' || typeof outbound !== 'string') {
     return res.json({ success: false, error: 'Invalid selector/outbound' });
   }
-  const body = JSON.stringify({ name: outbound });
-  const reqClash = http.request(
-    {
-      host: '127.0.0.1',
-      port: 9090,
-      path: '/proxies/' + encodeURIComponent(selector),
-      method: 'PUT',
-      timeout: 3000,
-      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
-    },
-    (clashRes) => {
-      clashRes.resume();
-      if (clashRes.statusCode === 204 || clashRes.statusCode === 200) {
-        res.json({ success: true });
-      } else {
-        res.json({ success: false, error: 'Clash API returned status ' + clashRes.statusCode });
-      }
-    }
-  );
-  reqClash.on('error', (err) => res.json({ success: false, error: err.message }));
-  reqClash.on('timeout', () => { reqClash.destroy(); res.json({ success: false, error: 'Clash API timeout' }); });
-  reqClash.write(body);
-  reqClash.end();
+  if (!clashApi) return res.json({ success: false, error: 'sing-box is not running' });
+  res.json(await clashSelect(clashApi, selector, outbound));
 });
 
 // Core update endpoints. In web/server mode the binary lives outside the app
@@ -517,30 +546,23 @@ app.post('/api/singbox/upgrade', (_req, res) => {
 });
 
 /**
- * Cached sing-box version, used to decide which config surface to generate.
+ * sing-box version, used to decide which config surface to generate.
  *
  * Some fields only exist in newer cores and are rejected outright by older ones
  * ("json: unknown field ..."), so the generator has to know what it is talking
- * to. Cached because config generation happens on every connect.
+ * to. Cached because config generation happens on every connect; a failed
+ * probe is not cached, so a slow first run can't pin the oldest surface for
+ * the whole session (compat R1).
  */
-let cachedCoreVersion = null;
-
-function getCoreVersion() {
-  if (cachedCoreVersion !== null) return Promise.resolve(cachedCoreVersion);
-  return new Promise((resolve) => {
-    const singboxPath = getSingboxPath();
-    exec('"' + singboxPath + '" version', (error, stdout) => {
-      const match = !error && stdout && stdout.match(/sing-box version (\S+)/);
-      cachedCoreVersion = match ? match[1] : '0.0.0';
-      resolve(cachedCoreVersion);
-    });
-  });
-}
+const coreVersionProbe = createCoreVersionProbe({ getBinaryPath: getSingboxPath, log: addLog });
 
 app.post('/api/config/generate', async (req, res) => {
   const { nodes, selectedIndex, settings } = req.body;
-  const coreVersion = await getCoreVersion();
-  res.json({ config: generateSingboxConfig(nodes, selectedIndex, { ...settings, coreVersion }) });
+  // An unreadable core gets the oldest supported surface for this one config.
+  const coreVersion = (await coreVersionProbe.get()) ?? '0.0.0';
+  // clashApi: undefined — the browser-facing config never carries a
+  // controller; startSingbox injects the real credentials into the file.
+  res.json({ config: generateSingboxConfig(nodes, selectedIndex, { ...settings, clashApi: undefined, coreVersion }) });
 });
 
 app.post('/api/config/write', (req, res) => {
@@ -552,24 +574,18 @@ app.post('/api/config/write', (req, res) => {
   res.json({ path: CONFIG_FILE });
 });
 
-app.get('/api/config/read', (_req, res) => {
-  if (fs.existsSync(CONFIG_FILE)) {
-    res.json({ config: JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8')) });
-  } else {
-    res.json({ config: null });
-  }
-});
-
+// enable accepts only 127.0.0.1 / localhost and a valid port (D12).
 app.post('/api/system-proxy/enable', async (req, res) => {
-  res.json({ success: await enableSystemProxy(req.body.host, req.body.port) });
+  const { host, port } = req.body || {};
+  res.json({ success: await systemProxy.enable(host, port) });
 });
 
 app.post('/api/system-proxy/disable', async (_req, res) => {
-  res.json({ success: await disableSystemProxy() });
+  res.json({ success: await systemProxy.disable() });
 });
 
 app.get('/api/system-proxy/status', async (_req, res) => {
-  res.json(await getSystemProxyStatus());
+  res.json(await systemProxy.status());
 });
 
 app.get('/api/store/:key', (req, res) => {
@@ -643,10 +659,13 @@ app.post('/api/network/test-delay', async (req, res) => {
   const { tag, url, timeout } = req.body || {};
   if (typeof tag !== 'string' || !tag) return res.json({ latency: -1 });
   if (url !== undefined && typeof url !== 'string') return res.json({ latency: -1 });
+  if (!singboxProcess || !clashApi) return res.json({ latency: -1 });
   const latency = await clashDelay({
     tag,
     url,
     timeout: Number.isInteger(timeout) ? timeout : 5000,
+    port: clashApi.port,
+    secret: clashApi.secret,
   });
   res.json({ latency });
 });
@@ -686,13 +705,13 @@ app.post('/api/network/test-speed', async (req, res) => {
 process.on('SIGINT', async () => {
   console.log('\nShutting down...');
   await stopSingbox();
-  await disableSystemProxy();
+  await systemProxy.disable();
   process.exit(0);
 });
 
 process.on('SIGTERM', async () => {
   await stopSingbox();
-  await disableSystemProxy();
+  await systemProxy.disable();
   process.exit(0);
 });
 
@@ -701,7 +720,12 @@ const PORT = parseInt(process.env.PORT || '3456');
 // Bind to loopback only. This server controls system proxy settings and the
 // sing-box process, so it must never be exposed on the LAN/public interfaces.
 const HOST = process.env.HOST || '127.0.0.1';
-server.listen(PORT, HOST, () => {
+// Before serving anything: put back a system proxy that a crash or kill of a
+// previous run left pointing at its dead core. Without a marker file this
+// reads nothing. recover() never rejects; the then() keeps startup unconditional.
+systemProxy.recover().then((result) => {
+  addLog('System proxy recovery at startup: ' + result);
+}).then(() => server.listen(PORT, HOST, () => {
   console.log('');
   console.log('  Awesome Proxy Backend');
   console.log('  +-- REST API:  http://' + HOST + ':' + PORT + '/api');
@@ -709,4 +733,6 @@ server.listen(PORT, HOST, () => {
   console.log('  +-- Config:    ' + CONFIG_DIR);
   console.log('  +-- sing-box:  ' + getSingboxPath());
   console.log('');
-});
+  // Prime the version cache so the first connect doesn't wait on the probe.
+  void coreVersionProbe.get();
+}));

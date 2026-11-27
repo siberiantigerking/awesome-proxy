@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import type { AppSettings, TrafficStats, SplitRule } from '../types';
+import { DEFAULT_DIRECT_DNS, DEFAULT_REMOTE_DNS } from '../services/dns-servers';
 
 interface SettingsStore {
   settings: AppSettings;
@@ -59,8 +60,22 @@ interface SettingsStore {
  *     `tunBypassLocalNetworks: true`, which keeps those subnets off the tunnel
  *     without disarming DNS protection. Anyone who left it at the default gets
  *     the new default (off) and an unchanged config.
+ *
+ * 6 — `remoteDns` and `directDns` take effect. The generator used to ignore
+ *     both and always emit Cloudflare DoH 1.1.1.1 and AliDNS DoH 223.5.5.5 by
+ *     IP literal, while the fields showed dns.google and dns.alidns.com
+ *     (audit P0-8). A field still holding exactly its old default was never
+ *     edited, so it moves to the literal the generator actually used, which is
+ *     also the new default: nothing changes for anyone who never touched DNS,
+ *     and the hostname defaults don't suddenly start needing a bootstrap
+ *     lookup through the local resolver. Edited values are kept and now take
+ *     effect.
  */
-const SETTINGS_VERSION = 5;
+const SETTINGS_VERSION = 6;
+
+/** The DNS defaults before v6, which the generator never used (see SETTINGS_VERSION 6). */
+const LEGACY_DEFAULT_REMOTE_DNS = 'https://dns.google/dns-query';
+const LEGACY_DEFAULT_DIRECT_DNS = 'https://dns.alidns.com/dns-query';
 
 /** Retired keys, stripped on load so they stop travelling with saved settings. */
 type RetiredSettings = { tunStrictRoute?: boolean };
@@ -76,12 +91,15 @@ const defaultSettings: AppSettings = {
   ipv6Strategy: 'block',
   tunBypassLocalNetworks: false,
   tunStack: 'mixed',
-  remoteDns: 'https://dns.google/dns-query',
-  directDns: 'https://dns.alidns.com/dns-query',
+  remoteDns: DEFAULT_REMOTE_DNS,
+  directDns: DEFAULT_DIRECT_DNS,
   bypassChina: true,
   logLevel: 'info',
   autoStart: false,
   startMinimized: false,
+  // A new key with a default needs no SETTINGS_VERSION bump: loadFromStore
+  // merges stored settings over these defaults, so older files just pick it up.
+  checkUpdatesOnStartup: true,
   theme: 'dark',
   splitRules: [],
   splitApps: [],
@@ -171,6 +189,14 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
           // default (true/undefined) means nothing to carry.
           if (storedVersion < 5 && retired.tunStrictRoute === false) {
             merged.tunBypassLocalNetworks = true;
+          }
+          // v6: the DNS fields start to matter. Only the exact old default
+          // counts as untouched; it moves to the server the generator has been
+          // using all along, so the generated DNS stays what it was. Anything
+          // else was typed by the user and is kept.
+          if (storedVersion < 6) {
+            if (merged.remoteDns === LEGACY_DEFAULT_REMOTE_DNS) merged.remoteDns = DEFAULT_REMOTE_DNS;
+            if (merged.directDns === LEGACY_DEFAULT_DIRECT_DNS) merged.directDns = DEFAULT_DIRECT_DNS;
           }
           merged.settingsVersion = SETTINGS_VERSION;
           set({ settings: merged });

@@ -6,7 +6,15 @@ import {
 import { useNodeStore } from '../store/nodeStore';
 import { useSubscriptionStore } from '../store/subscriptionStore';
 import { useSettingsStore } from '../store/settingsStore';
-import { parseProxyLink, parseProxyLinks, getCountryFlag, getProtocolColor } from '../services/node-parser';
+import { usePendingApplyStore } from '../store/pendingApplyStore';
+import {
+  parseProxyLink,
+  parseProxyLinks,
+  getCountryFlag,
+  getProtocolColor,
+  normalizeTransportType,
+  SUPPORTED_TRANSPORTS,
+} from '../services/node-parser';
 import { switchNode } from '../services/connection';
 import { buildProxyLink } from '../services/node-link';
 import { parseOvpnConfig } from '../services/ovpn-parser';
@@ -18,10 +26,14 @@ import {
   concurrencyFor,
   TEST_LABELS,
   TEST_DESCRIPTIONS,
+  PENDING_APPLY_REFUSAL,
   type TestContext,
   type TestResult,
 } from '../services/node-tests';
 import { useConfirm } from '../components/ConfirmDialog';
+import PendingApplyBanner from '../components/PendingApplyBanner';
+// Type only: the dialog itself is loaded on demand (openShare).
+import type { ShareTarget } from '../components/ShareDialog';
 import type { NodeTestKind, ProxyNode, ProxyProtocol } from '../types';
 
 const TEST_KINDS: NodeTestKind[] = ['tcp', 'real', 'udp', 'speed'];
@@ -65,9 +77,27 @@ export default function NodeManager() {
   const [testKind, setTestKind] = useState<NodeTestKind>('tcp');
   const [testError, setTestError] = useState<string | null>(null);
   const { confirm, confirmDialog } = useConfirm();
+  // The share dialog, once its chunk has loaded, and what it shares.
+  const [share, setShare] = useState<{
+    Dialog: React.ComponentType<{ target: ShareTarget; onClose: () => void }>;
+    target: ShareTarget;
+  } | null>(null);
   // Set to true to make in-flight test workers stop after their current probe.
   const abortTests = React.useRef(false);
   const isConnected = connectionStatus === 'connected';
+  // "Reconnect to apply" (Round 2 follow-up N6): while it is up, runNodeTest
+  // refuses the tests that go through the core, so their buttons are off.
+  const pendingApply = usePendingApplyStore((s) => s.pending);
+  // Why the selected test can't run right now (the Zap buttons' title), or
+  // null when it can: no core to run it through, or a core that still has the
+  // previous node list or settings.
+  const testBlocked = !requiresConnection(testKind)
+    ? null
+    : !isConnected
+    ? `${TEST_LABELS[testKind]} needs an active connection`
+    : pendingApply
+    ? 'Reconnect to apply first'
+    : null;
   // Group filter: 'all', 'manual' (nodes not from any subscription), or a
   // subscription id. Nodes are grouped by which subscription imported them.
   const [activeGroup, setActiveGroup] = useState<string>('all');
@@ -144,6 +174,12 @@ export default function NodeManager() {
   // Apply one test result to the store. Each kind writes a different field, so
   // a speed test never overwrites a perfectly good latency reading.
   const applyResult = (node: ProxyNode, result: TestResult) => {
+    // Refused while changes are pending: nothing was measured, so the node
+    // keeps its last reading instead of showing a failure it never had.
+    if (result.refused) {
+      if (result.error) setTestError(`${node.name}: ${result.error}`);
+      return;
+    }
     if (result.kind === 'speed') {
       updateSpeed(node.id, result.mbps ?? 0);
     } else if (result.kind === 'udp') {
@@ -159,6 +195,10 @@ export default function NodeManager() {
     settings,
     selectedIndex,
     connected: connectionStatus === 'connected',
+    // Read when the test starts, not from the last render. A Test All run
+    // keeps the context it started with: its node list is the one the core
+    // it started against was running.
+    pendingApply: usePendingApplyStore.getState().pending,
   });
 
   const handleTestNode = async (node: ProxyNode) => {
@@ -291,6 +331,26 @@ export default function NodeManager() {
     }
   };
 
+  // The share dialog brings the QR encoder and its library, so it is a lazy
+  // chunk, loaded on the first Share click as jsQR is for the QR import: the
+  // main chunk only carries these buttons. A dynamic import rather than
+  // React.lazy, because a chunk that fails to load would need an error
+  // boundary there; here it is one fixed message.
+  const openShare = async (target: ShareTarget) => {
+    try {
+      const { default: Dialog } = await import('../components/ShareDialog');
+      setShare({ Dialog, target });
+    } catch {
+      setTestError('Could not open the share dialog.');
+    }
+  };
+
+  const handleShareSelected = () => {
+    // List order, which the dialog's pager and Copy all links keep.
+    const picked = nodes.filter((n) => selectedIds.has(n.id));
+    if (picked.length > 0) void openShare({ kind: 'nodes', nodes: picked });
+  };
+
   return (
     <div className="space-y-4 h-full flex flex-col">
       {/* Header */}
@@ -307,6 +367,11 @@ export default function NodeManager() {
           </button>
         </div>
       </div>
+
+      {/* The core still runs an older node list or settings (e.g. after a
+          subscription refresh while connected). Here too, because the tests
+          that go through the core wait for it (N6). */}
+      <PendingApplyBanner />
 
       {/* Toolbar */}
       <div className="flex items-center gap-3">
@@ -345,16 +410,18 @@ export default function NodeManager() {
         ) : (
           <button
             onClick={handleTestAll}
-            disabled={testAllTargets.length === 0 || (requiresConnection(testKind) && !isConnected)}
-            title={
-              requiresConnection(testKind) && !isConnected
-                ? `${TEST_LABELS[testKind]} needs an active connection`
-                : `Run ${TEST_LABELS[testKind]} on ${testAllTargets.length} node(s)`
-            }
+            disabled={testAllTargets.length === 0 || testBlocked !== null}
+            title={testBlocked ?? `Run ${TEST_LABELS[testKind]} on ${testAllTargets.length} node(s)`}
             className="btn-secondary flex items-center gap-1.5"
           >
             <Zap size={14} />
             Test All{testAllTargets.length > 0 ? ` (${testAllTargets.length})` : ''}
+          </button>
+        )}
+        {selectedIds.size > 0 && (
+          <button onClick={handleShareSelected} className="btn-secondary flex items-center gap-1.5">
+            <QrCode size={14} />
+            Share ({selectedIds.size})
           </button>
         )}
         {selectedIds.size > 0 && (
@@ -379,6 +446,9 @@ export default function NodeManager() {
           <p className="text-yellow-300">
             Connect first — this test runs through the core.
           </p>
+        )}
+        {requiresConnection(testKind) && isConnected && pendingApply && (
+          <p className="text-yellow-300">{PENDING_APPLY_REFUSAL}</p>
         )}
         {isDisruptive(testKind) && isConnected && (
           <p className="text-yellow-300">
@@ -546,14 +616,8 @@ export default function NodeManager() {
                   <button
                     onClick={(e) => { e.stopPropagation(); handleTestNode(node); }}
                     className="btn-icon"
-                    title={
-                      requiresConnection(testKind) && !isConnected
-                        ? `${TEST_LABELS[testKind]} needs an active connection`
-                        : `Run ${TEST_LABELS[testKind]}`
-                    }
-                    disabled={
-                      testingIds.has(node.id) || (requiresConnection(testKind) && !isConnected)
-                    }
+                    title={testBlocked ?? `Run ${TEST_LABELS[testKind]}`}
+                    disabled={testingIds.has(node.id) || testBlocked !== null}
                   >
                     <Zap size={14} className={testingIds.has(node.id) ? 'animate-pulse' : ''} />
                   </button>
@@ -563,6 +627,13 @@ export default function NodeManager() {
                     title="Copy link"
                   >
                     <Copy size={14} />
+                  </button>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); void openShare({ kind: 'node', node }); }}
+                    className="btn-icon"
+                    title="Share"
+                  >
+                    <QrCode size={14} />
                   </button>
                   <button
                     onClick={(e) => { e.stopPropagation(); setEditingNode(node); }}
@@ -620,6 +691,9 @@ export default function NodeManager() {
           }}
         />
       )}
+
+      {/* Share Dialog */}
+      {share && <share.Dialog target={share.target} onClose={() => setShare(null)} />}
 
       {confirmDialog}
     </div>
@@ -816,6 +890,49 @@ function ImportDialog({ onClose, onImport }: { onClose: () => void; onImport: (n
 
 // ==================== Node Form Dialog ====================
 
+/**
+ * The transport choice for a hand-made node. `http` is HTTP/2 (links write it
+ * `type=h2`). QUIC isn't offered, as before; a node imported with it, or with a
+ * transport sing-box lacks, gets an extra option for its stored value instead.
+ */
+const TRANSPORT_OPTIONS: { value: string; label: string }[] = [
+  { value: 'tcp', label: 'TCP' },
+  { value: 'ws', label: 'WebSocket' },
+  { value: 'grpc', label: 'gRPC' },
+  { value: 'http', label: 'HTTP/2' },
+  { value: 'httpupgrade', label: 'HTTPUpgrade' },
+];
+
+/**
+ * The uTLS fingerprints sing-box knows, the same 15 names as UTLS_FINGERPRINTS
+ * in shared/config-generator.cjs. The generator emits only these, because any
+ * other value stops the core at startup, so the form offers only these and
+ * marks any other stored value as ignored.
+ */
+const UTLS_FINGERPRINTS = [
+  'chrome',
+  'firefox',
+  'edge',
+  'safari',
+  '360',
+  'qq',
+  'ios',
+  'android',
+  'random',
+  'randomized',
+  'chrome_psk',
+  'chrome_psk_shuffle',
+  'chrome_padding_psk_shuffle',
+  'chrome_pq',
+  'chrome_pq_psk',
+];
+
+/** Example options per SIP003 plugin (the text after the plugin name in a link). */
+const SS_PLUGIN_PLACEHOLDERS: Record<NonNullable<ProxyNode['plugin']>, string> = {
+  'obfs-local': 'obfs=http;obfs-host=www.bing.com',
+  'v2ray-plugin': 'mode=websocket;host=cdn.example.com;path=/;tls',
+};
+
 function NodeFormDialog({
   node,
   onClose,
@@ -836,6 +953,24 @@ function NodeFormDialog({
   );
 
   const update = (field: string, value: any) => setForm((f) => ({ ...f, [field]: value }));
+
+  // Compared in the generator's normalised form, so a node an older import
+  // stored as `h2` or `WS` shows as HTTP/2 or WebSocket with its Path and Host,
+  // instead of a select that matches no option and looks like TCP.
+  const transport = normalizeTransportType(form.transportType);
+  // A stored value outside the fixed lists keeps an option of its own, so the
+  // select shows what the node really carries and the user can switch back.
+  const storedTransport = normalizeTransportType(node?.transportType);
+  const extraTransport = TRANSPORT_OPTIONS.some((o) => o.value === storedTransport) ? null : storedTransport;
+  // The generator skips a node for its transport only for these three
+  // protocols; every other protocol ignores the field, so it is not skipped.
+  const transportSkipped =
+    extraTransport !== null &&
+    !SUPPORTED_TRANSPORTS.has(extraTransport) &&
+    (form.type === 'vmess' || form.type === 'vless' || form.type === 'trojan');
+  const storedFingerprint = node?.fingerprint || '';
+  const extraFingerprint =
+    storedFingerprint && !UTLS_FINGERPRINTS.includes(storedFingerprint) ? storedFingerprint : null;
 
   const protocolOptions: { value: ProxyProtocol; label: string }[] = [
     { value: 'vmess', label: 'VMess' },
@@ -1324,6 +1459,44 @@ function NodeFormDialog({
             </>
           )}
 
+          {/* Shadowsocks SIP003 plugin: only the two sing-box runs itself */}
+          {form.type === 'shadowsocks' && (
+            <>
+              <div>
+                <label className="text-xs text-surface-400 mb-1 block">Plugin</label>
+                <select
+                  value={form.plugin || ''}
+                  onChange={(e) => {
+                    if (e.target.value) {
+                      update('plugin', e.target.value);
+                    } else {
+                      // Nothing reads the options without a plugin, so none
+                      // clears them too rather than keep stale text in the node.
+                      setForm((f) => ({ ...f, plugin: undefined, pluginOpts: undefined }));
+                    }
+                  }}
+                  className="input-field"
+                >
+                  <option value="">none</option>
+                  <option value="obfs-local">obfs-local</option>
+                  <option value="v2ray-plugin">v2ray-plugin</option>
+                </select>
+              </div>
+              {form.plugin && (
+                <div>
+                  <label className="text-xs text-surface-400 mb-1 block">Plugin Options</label>
+                  <input
+                    type="text"
+                    value={form.pluginOpts || ''}
+                    onChange={(e) => update('pluginOpts', e.target.value || undefined)}
+                    placeholder={SS_PLUGIN_PLACEHOLDERS[form.plugin]}
+                    className="input-field font-mono text-xs"
+                  />
+                </div>
+              )}
+            </>
+          )}
+
           {/* VMess specific */}
           {form.type === 'vmess' && (
             <div>
@@ -1423,29 +1596,104 @@ function NodeFormDialog({
             </>
           )}
 
+          {/* Plain TLS (no Reality). Placed after the Reality key, so typing a
+              key hides these without moving the field being typed into. */}
+          {form.tls && !form.realityPublicKey && (
+            <>
+              {/* The generator uses a uTLS fingerprint only for VMess and VLESS. */}
+              {(form.type === 'vmess' || form.type === 'vless') && (
+                <div>
+                  <label className="text-xs text-surface-400 mb-1 block">TLS Fingerprint (uTLS)</label>
+                  <select
+                    value={form.fingerprint || ''}
+                    onChange={(e) => update('fingerprint', e.target.value)}
+                    className="input-field"
+                  >
+                    <option value="">none</option>
+                    {UTLS_FINGERPRINTS.map((fp) => (
+                      <option key={fp} value={fp}>{fp}</option>
+                    ))}
+                    {extraFingerprint && (
+                      <option value={extraFingerprint}>{`${extraFingerprint} (unknown to sing-box, ignored)`}</option>
+                    )}
+                  </select>
+                </div>
+              )}
+              {/* Warned, because this turns off the only check that tells the
+                  real server from an impostor on the path. */}
+              <label className="flex items-start gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={!!form.allowInsecure}
+                  onChange={(e) => update('allowInsecure', e.target.checked)}
+                  className="mt-0.5"
+                />
+                <span className="text-xs text-surface-300">
+                  Skip certificate verification (allowInsecure)
+                  <span className={`block text-[11px] ${form.allowInsecure ? 'text-yellow-300' : 'text-surface-500'}`}>
+                    Only for a server with a self-signed certificate. With this on, anyone on the
+                    network path could impersonate the server.
+                  </span>
+                </span>
+              </label>
+            </>
+          )}
+
           {/* Transport */}
           <div>
             <label className="text-xs text-surface-400 mb-1 block">Transport</label>
             <select
-              value={form.transportType || 'tcp'}
+              value={transport}
               onChange={(e) => update('transportType', e.target.value)}
               className="input-field"
             >
-              <option value="tcp">TCP</option>
-              <option value="ws">WebSocket</option>
-              <option value="grpc">gRPC</option>
-              <option value="http">HTTP/2</option>
+              {TRANSPORT_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>{opt.label}</option>
+              ))}
+              {extraTransport && (
+                <option value={extraTransport}>
+                  {transportSkipped
+                    ? `${extraTransport} (not supported by sing-box, so the node is skipped)`
+                    : extraTransport}
+                </option>
+              )}
             </select>
           </div>
 
-          {form.transportType === 'ws' && (
+          {(transport === 'ws' || transport === 'httpupgrade' || transport === 'http') && (
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="text-xs text-surface-400 mb-1 block">Path</label>
+                <input
+                  type="text"
+                  value={form.transportPath || ''}
+                  onChange={(e) => update('transportPath', e.target.value)}
+                  placeholder="/path"
+                  className="input-field"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-surface-400 mb-1 block">Host</label>
+                <input
+                  type="text"
+                  value={form.transportHost || ''}
+                  onChange={(e) => update('transportHost', e.target.value)}
+                  placeholder="cdn.example.com (optional)"
+                  className="input-field"
+                />
+              </div>
+            </div>
+          )}
+
+          {/* gRPC keeps its service name in transportPath, as links import it. */}
+          {transport === 'grpc' && (
             <div>
-              <label className="text-xs text-surface-400 mb-1 block">WebSocket Path</label>
+              <label className="text-xs text-surface-400 mb-1 block">gRPC Service Name</label>
               <input
                 type="text"
                 value={form.transportPath || ''}
                 onChange={(e) => update('transportPath', e.target.value)}
-                placeholder="/path"
+                placeholder="service name"
                 className="input-field"
               />
             </div>

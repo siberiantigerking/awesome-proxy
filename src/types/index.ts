@@ -12,6 +12,14 @@ export type ProxyProtocol =
   | 'shadowtls'
   | 'openvpn';
 
+/**
+ * The VMess / VLESS / Trojan transports sing-box has. `tcp` means no transport
+ * block. `http` is HTTP/2: share links write it `type=h2` or `type=http`, vmess
+ * `net: h2`, mihomo `network: h2`. normalizeTransportType (node-parser.ts, and
+ * its mirror in shared/config-generator.cjs) maps every spelling onto these.
+ */
+export type KnownTransport = 'tcp' | 'ws' | 'grpc' | 'http' | 'quic' | 'httpupgrade';
+
 export interface ProxyNode {
   id: string;
   name: string;
@@ -30,6 +38,16 @@ export interface ProxyNode {
   
   // Shadowsocks
   method?: string;
+  /**
+   * SIP003 plugin, from a SIP002 link's `?plugin=`. Only the two plugins
+   * sing-box has are kept; a link naming any other plugin imports without one.
+   */
+  plugin?: 'obfs-local' | 'v2ray-plugin';
+  /**
+   * The plugin's options: the SIP003 text after the plugin name, e.g.
+   * `obfs=http;obfs-host=www.bing.com`. Emitted as sing-box's `plugin_opts`.
+   */
+  pluginOpts?: string;
   
   // TLS
   tls?: boolean;
@@ -42,8 +60,16 @@ export interface ProxyNode {
   realityShortId?: string;   // sid
 
   // Transport
-  transportType?: 'tcp' | 'ws' | 'grpc' | 'http' | 'quic';
+  /**
+   * A KnownTransport, or the lower-case name of a transport sing-box lacks
+   * (xhttp, splithttp, kcp, mkcp, ...). Such a name is kept as imported rather
+   * than turned into tcp, so the generator can name it when it skips the node,
+   * and a link shared from it still says which transport the server expects.
+   */
+  transportType?: KnownTransport | (string & {});
+  /** ws / httpupgrade / http path, or the gRPC service name. */
   transportPath?: string;
+  /** ws / httpupgrade Host header, or the http host. */
   transportHost?: string;
 
   // TUIC / Hysteria2 (QUIC)
@@ -224,11 +250,13 @@ export interface AppSettings {
    * apps that ask us — browsers with built-in DoH (Brave, Chrome's Secure DNS,
    * Firefox) resolve AAAA themselves and cannot be kept on IPv4 by DNS at all.
    *
-   * 'ipv4-only' (default) — TUN is IPv4-only, DNS is `ipv4_only`. With no IPv6
-   *   route through the tunnel, apps fall back to IPv4 immediately, which every
-   *   node can carry. Trade-off: on a network with real IPv6, IPv6 traffic is
-   *   not captured and leaves via the physical interface, which can expose your
-   *   real address (including via WebRTC). Same default as mihomo/clash.
+   * 'block' (default) — "No IPv6 leak" in the UI. Dual-stack TUN, so IPv6 is
+   *   captured instead of leaving via the physical interface, and DNS is
+   *   `ipv4_only`. An IPv6 destination that arrives anyway (a DoH browser
+   *   resolves AAAA itself) is re-resolved to IPv4 at routing time, from the
+   *   domain the sniffer recovered, and proxied, so it still works over an
+   *   IPv4-only node. It is refused only when that is impossible: an IPv6
+   *   literal with no domain to look up, or a site that is genuinely IPv6-only.
    *
    * 'prefer-ipv4' — "Allow IPv6" in the UI. Dual-stack TUN and DNS is
    *   `prefer_ipv4`, so AAAA does reach the client and IPv6-only destinations
@@ -238,11 +266,13 @@ export interface AppSettings {
    *   destinations are still reached over IPv4 by design, so a "what's my IP"
    *   page will keep reporting the IPv4 exit; that is not a failure.
    *
-   * 'block' — dual-stack TUN, DNS is `ipv4_only`, and a route rule refuses IPv6
-   *   instead of proxying it. Leak-safe. The refusal lands after the gvisor
-   *   stack has already accepted the handshake, so a DoH-enabled browser sees an
-   *   established connection and then a reset, and retries. Use it only when
-   *   you need IPv6 provably off and are willing to accept that.
+   * 'ipv4-only' — TUN is IPv4-only, DNS is `ipv4_only`. With no IPv6 route
+   *   through the tunnel, apps fall back to IPv4 immediately, which every node
+   *   can carry. Trade-off: on a network with real IPv6, IPv6 traffic is not
+   *   captured and leaves via the physical interface, which can expose your
+   *   real address (including via WebRTC). Once the default (as in
+   *   mihomo/clash), it is now the fallback for when the dual-stack TUN breaks
+   *   WSL2, Docker or Hyper-V networking, and it leaks IPv6.
    */
   ipv6Strategy?: 'block' | 'prefer-ipv4' | 'ipv4-only';
 
@@ -257,9 +287,11 @@ export interface AppSettings {
    *
    * This REPLACED a `tunStrictRoute` toggle, which solved the same problem by
    * turning off TUN `strict_route` wholesale. That is not a viable trade on
-   * Windows. Since sing-box 1.14 the TUN's `dns_mode` defaults to `hijack`, and
-   * the documented Windows half of `hijack` — a WFP filter blocking port 53 on
-   * every interface except the TUN — applies ONLY when `strict_route` is on.
+   * Windows. Since sing-box 1.14 the TUN's `dns_mode` defaults to `hijack` when
+   * `auto_route` is enabled (it always is here; since 1.14.3 it defaults to
+   * `disabled` without it), and the documented Windows half of `hijack` — a WFP
+   * filter blocking port 53 on every interface except the TUN — applies ONLY
+   * when `strict_route` is on.
    * Without that filter, Windows' Smart Multi-Homed Name Resolution queries the
    * DNS servers of all interfaces in parallel and keeps whichever answer lands
    * first. Resolution through the proxy costs 200ms+ while the local resolver
@@ -300,7 +332,7 @@ export interface AppSettings {
 
   /**
    * Version of the sing-box binary the generated config will be handed to,
-   * e.g. "1.14.0". NOT a user setting and not persisted — it is filled in by
+   * e.g. "1.14.4". NOT a user setting and not persisted — it is filled in by
    * the backend (Electron main / web server) at generation time.
    *
    * The config surface differs between cores, and Settings → About can upgrade
@@ -310,12 +342,55 @@ export interface AppSettings {
    * while omitting a newer one only loses an optimisation.
    */
   coreVersion?: string;
+  /**
+   * Remote DNS: answers every name except the mainland-China domains of
+   * `bypassChina` (`dns.final`), reached through the proxy when there are
+   * nodes. Default `https://1.1.1.1/dns-query`.
+   *
+   * Accepted forms: `https://host[:port][/path]` (no path means /dns-query),
+   * `h3://` with the same rule, `tls://host[:port]`, `quic://host[:port]`,
+   * `udp://host[:port]`, or a bare IPv4/IPv6 address for plain DNS. The host is
+   * an IP address (IPv6 in brackets) or a name. A name is first looked up
+   * through the proxy as well, by Cloudflare DoH at 1.1.1.1
+   * (`domain_resolver: 'remote-dns-bootstrap'`), so the OS resolver never sees
+   * it; with no nodes there is no proxy, and the OS resolver (`local-dns`)
+   * looks it up. The defaults are IP literals so they need no such bootstrap.
+   * A value that doesn't parse is replaced by the default in the generated
+   * config, so the core always starts, and Settings flags it. The rules are
+   * parseDnsServer in shared/config-generator.cjs, mirrored by
+   * src/services/dns-servers.ts.
+   *
+   * Before settings v6 the generator ignored this field, and its default read
+   * https://dns.google/dns-query without ever being used; the v6 migration
+   * moves that untouched value to the default above.
+   */
   remoteDns: string;
+  /**
+   * Direct DNS: answers the mainland-China domains of `bypassChina` (they are
+   * sent here whether or not that toggle is on), reached directly, never
+   * through the proxy. Default `https://223.5.5.5/dns-query`. Forms and fallback
+   * as for `remoteDns`; a name is first looked up through the OS resolver
+   * (`domain_resolver: 'local-dns'`). Before settings v6 it was ignored too,
+   * with the unused default https://dns.alidns.com/dns-query.
+   */
   directDns: string;
+  /**
+   * Route six mainland-China domain suffixes direct instead of through the
+   * proxy: .cn, .baidu.com, .qq.com, .taobao.com, .jd.com and .alipay.com. It
+   * matches no IP ranges and no other mainland site, which is why the UI says
+   * "common mainland-China domains" and no longer "China IP addresses". Real
+   * China routing (China IP ranges and site lists) is audit P1-3.
+   */
   bypassChina: boolean;
   logLevel: LogLevel;
   autoStart: boolean;
   startMinimized: boolean;
+  /**
+   * Check GitHub for a newer Awesome Proxy shortly after launch (desktop app
+   * only). It only notifies, with a dot on Settings; nothing is downloaded or
+   * installed until the user clicks. Defaults to true (settingsStore).
+   */
+  checkUpdatesOnStartup?: boolean;
   theme: Theme;
 
   // Split mode: domain-based routing rules. Each rule sends a group of
@@ -326,6 +401,8 @@ export interface AppSettings {
 }
 
 export interface SplitRule {
+  // The id also names the rule's selector outbound (`split:<id>`, see
+  // splitSelectorTag), so it has to stay unique among the rules.
   id: string;           // matches preset id or custom
   name: string;         // display label
   outbound: string;     // node name/tag, or "proxy", "direct", "auto"
@@ -351,12 +428,82 @@ export interface TrafficStats {
   history: TrafficData[];
 }
 
+/**
+ * Sent by main when sing-box kept stopping unexpectedly and its watchdog gave
+ * up restarting it (the app is then disconnected). Plain text throughout.
+ */
+export interface CoreCrashInfo {
+  message: string;
+  /** Up to 5 of the core's last log lines, its error lines when it printed any. */
+  lines: string[];
+  /** When main gave up (epoch ms). */
+  at: number;
+}
+
 // ==================== Log Types ====================
 
 export interface LogEntry {
   timestamp: string;
   message: string;
   level?: string;
+}
+
+// ==================== App Update Types ====================
+// Mirrors electron/app-updater.ts; the renderer can't import from electron/ (separate tsconfig).
+
+export type AppUpdateState =
+  | 'unsupported'
+  | 'idle'
+  | 'checking'
+  | 'not-available'
+  | 'available'
+  | 'downloading'
+  | 'downloaded'
+  | 'installing'
+  | 'error';
+
+export type AppUpdateErrorKind =
+  | 'no-update-metadata'
+  | 'no-release'
+  | 'rate-limited'
+  | 'offline'
+  | 'dns'
+  | 'timeout'
+  | 'proxy'
+  | 'network'
+  | 'integrity'
+  | 'install'
+  | 'unknown';
+
+export interface AppUpdateStatus {
+  state: AppUpdateState;
+  /** The installed app version. */
+  currentVersion: string;
+  /** Set while available / downloading / downloaded / installing. */
+  version?: string;
+  /** ISO date from latest.yml. */
+  releaseDate?: string;
+  /** PLAIN TEXT (HTML already stripped in main). Render as text, never as markup. */
+  releaseNotes?: string;
+  /** Installer size in bytes, when known. */
+  size?: number;
+  progress?: { percent: number; bytesPerSecond: number; transferred: number; total: number };
+  error?: { kind: AppUpdateErrorKind; message: string };
+}
+
+/**
+ * Updates of Awesome Proxy itself, from its GitHub releases. Takes no URLs:
+ * the main process decides where updates come from.
+ */
+export interface AppUpdaterAPI {
+  /** `background` marks the quiet startup check, whose failures aren't shown as errors. */
+  check: (options?: { background?: boolean }) => Promise<AppUpdateStatus>;
+  download: () => Promise<AppUpdateStatus>;
+  /** Disconnects (same cleanup as quitting), then restarts into the installer. */
+  install: () => Promise<AppUpdateStatus>;
+  openReleasesPage: () => Promise<void>;
+  /** Returns an unsubscribe function. */
+  onStatus: (callback: (status: AppUpdateStatus) => void) => () => void;
 }
 
 // ==================== API Types (window.api) ====================
@@ -378,42 +525,52 @@ export interface ElectronAPI {
       current?: string;
       latest?: string;
       hasUpdate?: boolean;
+      /** False when `latest` is newer than the core line this app version was validated with. */
+      validated?: boolean;
+      /** The validated core line, e.g. "1.14.x". */
+      maxValidated?: string;
       downloadUrl?: string;
       notes?: string;
       error?: string;
     }>;
-    upgrade: () => Promise<{
+    /** Pass `allowUnvalidated` only after the user confirmed installing an unvalidated core. */
+    upgrade: (options?: { allowUnvalidated?: boolean }) => Promise<{
       success: boolean;
       upgraded?: boolean;
       current?: string;
       latest?: string;
+      /** The latest core isn't validated with this app version: ask, then retry with allowUnvalidated. */
+      needsConfirmation?: boolean;
       error?: string;
     }>;
+    /** Desktop only: whether the previous core is kept, and its version when known. */
+    getCoreBackup?: () => Promise<{ available: boolean; version?: string }>;
+    /** Desktop only: put the previous core back. Disconnects first. */
+    restorePreviousCore?: () => Promise<{ success: boolean; current?: string; error?: string }>;
     onUpgradeProgress: (callback: (data: { stage: string; percent?: number; message?: string }) => void) => void;
     onLog: (callback: (log: string) => void) => void;
     onStatusChange: (callback: (status: ConnectionStatus) => void) => void;
     onTrafficUpdate: (callback: (data: { up: number; down: number }) => void) => void;
+    /** Desktop only: the core watchdog gave up. Returns an unsubscribe function. */
+    onCrashed?: (callback: (info: CoreCrashInfo) => void) => () => void;
   };
   config: {
     generate: (nodes: ProxyNode[], selectedIndex: number, settings: AppSettings) => Promise<object>;
     write: (config: object) => Promise<string>;
-    read: () => Promise<object | null>;
   };
   tray?: {
     setMode: (mode: ProxyMode) => Promise<void>;
     onConnect: (callback: () => void) => void;
-    onDisconnect: (callback: () => void) => void;
   };
   systemProxy: {
     enable: (host: string, port: number) => Promise<boolean>;
     disable: () => Promise<boolean>;
     getStatus: () => Promise<{ enabled: boolean; server: string }>;
   };
+  /** Pickers only: they return the chosen path. No file is read or written by path (audit P0-5). */
   file: {
     selectFile: (filters?: { name: string; extensions: string[] }[]) => Promise<string | null>;
     selectDirectory: () => Promise<string | null>;
-    readText: (filePath: string) => Promise<string>;
-    writeText: (filePath: string, content: string) => Promise<boolean>;
   };
   store: {
     get: (key: string) => Promise<any>;
@@ -447,6 +604,8 @@ export interface ElectronAPI {
     ) => Promise<{ mbps: number; bytes: number; ms: number; error?: string }>;
     getLanAddresses?: () => Promise<string[]>;
   };
+  /** Desktop only (electron-updater); absent in web mode. */
+  updater?: AppUpdaterAPI;
 }
 
 declare global {

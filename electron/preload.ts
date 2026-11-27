@@ -1,4 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron';
+// Type-only, so it is erased from preload.js: the sandboxed preload can only
+// require 'electron', and a runtime require would take the whole bridge down.
+import type { AppUpdateStatus } from './app-updater';
 
 // Expose protected methods that allow the renderer process to use
 // ipcRenderer without exposing the entire object
@@ -16,7 +19,12 @@ contextBridge.exposeInMainWorld('api', {
       ipcRenderer.invoke('singbox:select', selector, outbound),
     getSelection: (selector: string) => ipcRenderer.invoke('singbox:selection', selector),
     checkUpdate: () => ipcRenderer.invoke('singbox:check-update'),
-    upgrade: () => ipcRenderer.invoke('singbox:upgrade'),
+    // Only the user's "install anyway" answer crosses over; main decides what
+    // to download and checks it against GitHub's digest.
+    upgrade: (options?: { allowUnvalidated?: boolean }) =>
+      ipcRenderer.invoke('singbox:upgrade', { allowUnvalidated: options?.allowUnvalidated === true }),
+    getCoreBackup: () => ipcRenderer.invoke('singbox:core-backup'),
+    restorePreviousCore: () => ipcRenderer.invoke('singbox:restore-core'),
     onUpgradeProgress: (callback: (data: { stage: string; percent?: number; message?: string }) => void) => {
       ipcRenderer.on('singbox:upgrade-progress', (_event, data) => callback(data));
     },
@@ -29,6 +37,16 @@ contextBridge.exposeInMainWorld('api', {
     onTrafficUpdate: (callback: (data: { up: number; down: number }) => void) => {
       ipcRenderer.on('singbox:traffic', (_event, data) => callback(data));
     },
+    // The core watchdog gave up (main.ts giveUpOnCore). The type is spelled out
+    // here rather than imported, so nothing but 'electron' is required at runtime.
+    onCrashed: (callback: (info: { message: string; lines: string[]; at: number }) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, info: { message: string; lines: string[]; at: number }) =>
+        callback(info);
+      ipcRenderer.on('singbox:crashed', listener);
+      return () => {
+        ipcRenderer.removeListener('singbox:crashed', listener);
+      };
+    },
   },
 
   // Configuration management
@@ -36,7 +54,6 @@ contextBridge.exposeInMainWorld('api', {
     generate: (nodes: any[], selectedIndex: number, settings: any) =>
       ipcRenderer.invoke('config:generate', nodes, selectedIndex, settings),
     write: (config: object) => ipcRenderer.invoke('config:write', config),
-    read: () => ipcRenderer.invoke('config:read'),
   },
 
   // System proxy
@@ -47,14 +64,12 @@ contextBridge.exposeInMainWorld('api', {
     getStatus: () => ipcRenderer.invoke('system-proxy:status'),
   },
 
-  // File operations
+  // File pickers only: they return the path the user chose. Nothing here reads
+  // or writes a file by path (audit P0-5).
   file: {
     selectFile: (filters?: { name: string; extensions: string[] }[]) =>
       ipcRenderer.invoke('file:select', filters),
     selectDirectory: () => ipcRenderer.invoke('file:select-directory'),
-    readText: (filePath: string) => ipcRenderer.invoke('file:read-text', filePath),
-    writeText: (filePath: string, content: string) =>
-      ipcRenderer.invoke('file:write-text', filePath, content),
   },
 
   // Store (persistent data)
@@ -64,14 +79,11 @@ contextBridge.exposeInMainWorld('api', {
     delete: (key: string) => ipcRenderer.invoke('store:delete', key),
   },
 
-  // Tray
+  // Tray (its Disconnect runs in main, so only Connect reaches the renderer)
   tray: {
     setMode: (mode: string) => ipcRenderer.invoke('tray:set-mode', mode),
     onConnect: (callback: () => void) => {
       ipcRenderer.on('tray:connect', () => callback());
-    },
-    onDisconnect: (callback: () => void) => {
-      ipcRenderer.on('tray:disconnect', () => callback());
     },
   },
 
@@ -103,5 +115,23 @@ contextBridge.exposeInMainWorld('api', {
     testSpeed: (proxyPort: number, options?: { url?: string; durationMs?: number }) =>
       ipcRenderer.invoke('network:test-speed', proxyPort, options),
     getLanAddresses: () => ipcRenderer.invoke('network:get-lan-addresses'),
+  },
+
+  // In-app updates of Awesome Proxy itself (electron-updater, GitHub Releases).
+  // Not the sing-box core upgrade under `singbox`, not the subscription
+  // scheduler. Takes no URLs or paths: main decides where updates come from.
+  updater: {
+    check: (options?: { background?: boolean }) =>
+      ipcRenderer.invoke('app-updater:check', { background: options?.background === true }),
+    download: () => ipcRenderer.invoke('app-updater:download'),
+    install: () => ipcRenderer.invoke('app-updater:install'),
+    openReleasesPage: () => ipcRenderer.invoke('app-updater:open-releases'),
+    onStatus: (callback: (status: AppUpdateStatus) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, status: AppUpdateStatus) => callback(status);
+      ipcRenderer.on('app-updater:status', listener);
+      return () => {
+        ipcRenderer.removeListener('app-updater:status', listener);
+      };
+    },
   },
 });

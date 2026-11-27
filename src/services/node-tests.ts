@@ -28,6 +28,12 @@ export interface TestContext {
   /** Index of the node the user is actually connected through. */
   selectedIndex: number;
   connected: boolean;
+  /**
+   * "Reconnect to apply" is up: the running core has an older node list or
+   * older settings than `nodes` and `settings`, so runNodeTest refuses the
+   * tests that go through it (Round 2 follow-up N6). Absent means false.
+   */
+  pendingApply?: boolean;
 }
 
 export interface TestResult {
@@ -39,7 +45,17 @@ export interface TestResult {
   /** UDP verdict for 'udp'. */
   udpOk?: boolean;
   error?: string;
+  /**
+   * True when runNodeTest refused to run the test (TestContext.pendingApply).
+   * Nothing was measured, so the caller records no result; `error` says why.
+   */
+  refused?: boolean;
 }
+
+/** Why runNodeTest refuses a test that goes through the core while changes are pending. */
+export const PENDING_APPLY_REFUSAL =
+  'Reconnect to apply first: the running core still has the previous node list or settings, ' +
+  'so this test could measure a different node.';
 
 /** Tests that need the core running, because they go through it. */
 export function requiresConnection(kind: NodeTestKind): boolean {
@@ -153,7 +169,8 @@ async function runSpeed(node: ProxyNode, ctx: TestContext): Promise<TestResult> 
 
 /**
  * Run one test against one node. Never throws — a failed probe is a normal
- * outcome and comes back as `error` / a -1 latency.
+ * outcome and comes back as `error` / a -1 latency. A test refused while
+ * changes are pending comes back with `refused` and nothing measured.
  */
 export async function runNodeTest(
   kind: NodeTestKind,
@@ -164,6 +181,18 @@ export async function runNodeTest(
   if (!isSupported(kind)) return { kind, error: `${TEST_LABELS[kind]} is not available here` };
   if (requiresConnection(kind) && !ctx.connected) {
     return { kind, error: `${TEST_LABELS[kind]} needs an active connection` };
+  }
+  // "Reconnect to apply" is up (Round 2 follow-up N6), typically after a
+  // subscription refresh while connected. Every test that goes through the
+  // core addresses the node by its tag in ctx.nodes, the current list, and
+  // tag suffixes follow list order, so with same-named nodes the tag can name
+  // another node in the running core: the result would be stored on the wrong
+  // node, and udp and speed would briefly move live traffic onto that one
+  // (they also use the current mixed port, which a pending change may have
+  // moved). Refuse before any call reaches the core. TCP ping dials the
+  // server directly and never touches the core, so it still runs.
+  if (requiresConnection(kind) && ctx.pendingApply) {
+    return { kind, refused: true, error: PENDING_APPLY_REFUSAL };
   }
 
   try {

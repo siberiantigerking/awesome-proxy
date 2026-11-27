@@ -1,0 +1,125 @@
+# Clash/Mihomo subscription fixture for tests/unit/clash-yaml.test.ts.
+# One proxy per type parseClashYaml knows (two for VLESS: Reality+Vision over
+# TCP, and gRPC), then an unsupported type and an entry without a server, which
+# must both be skipped. Dummy values; nothing here reaches a real server.
+port: 7890
+mode: rule
+proxies:
+  - name: "日本 JP vmess ws"
+    type: vmess
+    server: vmess.example.com
+    port: 443
+    uuid: 2420e4a1-e97c-4780-a7a0-f47b2a402ba7
+    alterId: 0
+    cipher: auto
+    tls: true
+    servername: sni.example.com
+    network: ws
+    ws-opts:
+      path: /vmess
+      headers:
+        Host: cdn.example.com
+
+  - name: vless reality vision
+    type: vless
+    server: vless.example.com
+    port: 443
+    uuid: 2420e4a1-e97c-4780-a7a0-f47b2a402ba7
+    network: tcp
+    tls: true
+    flow: xtls-rprx-vision
+    servername: www.example.com
+    client-fingerprint: chrome
+    reality-opts:
+      public-key: WtyFbF5JOHxY52iYnUbP15Zy4t_AdUGN0Nu5S5t9JEo
+      short-id: 0123abcd
+
+  - name: vless grpc
+    type: vless
+    server: vless.example.com
+    port: 443
+    uuid: 2420e4a1-e97c-4780-a7a0-f47b2a402ba7
+    network: grpc
+    tls: true
+    servername: sni.example.com
+    grpc-opts:
+      grpc-service-name: vless-grpc
+
+  - name: trojan
+    type: trojan
+    server: trojan.example.com
+    port: 443
+    password: trojan-password
+    sni: sni.example.com
+    skip-cert-verify: true
+
+  - name: ss
+    type: ss
+    server: ss.example.com
+    port: 8388
+    cipher: aes-256-gcm
+    password: ss-password
+
+  - name: hysteria2
+    type: hysteria2
+    server: hy2.example.com
+    port: 443
+    ports: "19196-19197,19198"
+    hop-interval: 30
+    password: hy2-password
+    up: "50 Mbps"
+    down: "200 Mbps"
+    obfs: salamander
+    obfs-password: obfs-password
+    sni: sni.example.com
+
+  - name: tuic
+    type: tuic
+    server: tuic.example.com
+    port: 443
+    uuid: 2420e4a1-e97c-4780-a7a0-f47b2a402ba7
+    password: tuic-password
+    congestion-controller: bbr
+    udp-relay-mode: native
+    sni: sni.example.com
+
+  - name: anytls
+    type: anytls
+    server: anytls.example.com
+    port: 443
+    password: anytls-password
+    sni: sni.example.com
+    skip-cert-verify: true
+
+  - name: shadowtls
+    type: shadowtls
+    server: shadowtls.example.com
+    port: 443
+    version: 3
+    cipher: aes-128-gcm
+    password: inner-ss-password
+    shadowtls-password: shadowtls-password
+    sni: www.example.com
+
+  - name: wireguard
+    type: wireguard
+    server: wg.example.com
+    port: 51820
+    ip: 10.0.0.2
+    ipv6: fd00::2
+    private-key: iIGbFKdo9vdiXQQRQCtAdstbfI7edqrHIn8XgE0X0EI=
+    public-key: ZKw+L8OgzvCHV9VGZCBdPNqernMi0E+aRp2m177c1lQ=
+    pre-shared-key: AMa/l+dkp3gwvM3rFsm8ZKzpBbfJJWGbdRA22wrSFjs=
+    reserved: [1, 2, 3]
+    mtu: 1408
+
+  - name: unsupported snell
+    type: snell
+    server: snell.example.com
+    port: 443
+    psk: snell-psk
+
+  - name: no server
+    type: vmess
+    port: 443
+    uuid: 2420e4a1-e97c-4780-a7a0-f47b2a402ba7

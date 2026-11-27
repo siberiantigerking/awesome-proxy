@@ -1,0 +1,154 @@
+{
+  "log": {
+    "level": "info",
+    "timestamp": true
+  },
+  "dns": {
+    "servers": [
+      {
+        "tag": "hosts-dns",
+        "type": "hosts",
+        "predefined": {
+          "localhost": [
+            "127.0.0.1",
+            "::1"
+          ]
+        }
+      },
+      {
+        "tag": "local-dns",
+        "type": "local"
+      },
+      {
+        "tag": "remote-dns",
+        "type": "https",
+        "server": "1.1.1.1",
+        "path": "/dns-query"
+      },
+      {
+        "tag": "direct-dns",
+        "type": "https",
+        "server": "223.5.5.5",
+        "path": "/dns-query"
+      }
+    ],
+    "strategy": "ipv4_only",
+    "rules": [
+      {
+        "domain_suffix": [
+          ".cn",
+          ".baidu.com",
+          ".qq.com",
+          ".taobao.com",
+          ".jd.com",
+          ".alipay.com"
+        ],
+        "server": "direct-dns"
+      }
+    ],
+    "final": "remote-dns"
+  },
+  "inbounds": [
+    {
+      "type": "mixed",
+      "tag": "mixed-in",
+      "listen": "127.0.0.1",
+      "listen_port": 7890
+    },
+    {
+      "type": "tun",
+      "tag": "tun-in",
+      "address": [
+        "198.18.0.1/30",
+        "fd19:8180:9a3f::1/126"
+      ],
+      "auto_route": true,
+      "strict_route": true,
+      "interface_name": "awesome-tun0",
+      "mtu": 9000,
+      "stack": "mixed"
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "direct"
+    }
+  ],
+  "route": {
+    "rules": [
+      {
+        "action": "sniff"
+      },
+      {
+        "protocol": "dns",
+        "action": "hijack-dns"
+      },
+      {
+        "domain": [
+          "localhost"
+        ],
+        "action": "resolve",
+        "server": "hosts-dns"
+      },
+      {
+        "ip_is_private": true,
+        "outbound": "direct"
+      },
+      {
+        "domain": [
+          "localhost"
+        ],
+        "domain_suffix": [
+          ".localhost",
+          ".local",
+          ".internal",
+          ".lan",
+          ".home.arpa"
+        ],
+        "domain_regex": [
+          "^[^.]+$"
+        ],
+        "outbound": "direct"
+      },
+      {
+        "ip_version": 6,
+        "action": "resolve",
+        "strategy": "ipv4_only"
+      },
+      {
+        "ip_version": 6,
+        "action": "reject"
+      },
+      {
+        "domain_suffix": [
+          ".cn",
+          ".baidu.com",
+          ".qq.com",
+          ".taobao.com",
+          ".jd.com",
+          ".alipay.com"
+        ],
+        "outbound": "direct"
+      }
+    ],
+    "rule_set": [],
+    "auto_detect_interface": true,
+    "default_domain_resolver": {
+      "server": "local-dns",
+      "strategy": "prefer_ipv4"
+    },
+    "final": "direct"
+  },
+  "experimental": {
+    "clash_api": {
+      "external_controller": "127.0.0.1:19191",
+      "external_ui": "",
+      "secret": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    "cache_file": {
+      "enabled": true,
+      "path": "C:\\awesome-proxy-test\\cache.db"
+    }
+  }
+}

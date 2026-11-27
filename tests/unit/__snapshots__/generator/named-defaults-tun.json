@@ -1,0 +1,428 @@
+{
+  "log": {
+    "level": "info",
+    "timestamp": true
+  },
+  "dns": {
+    "servers": [
+      {
+        "tag": "hosts-dns",
+        "type": "hosts",
+        "predefined": {
+          "localhost": [
+            "127.0.0.1",
+            "::1"
+          ]
+        }
+      },
+      {
+        "tag": "local-dns",
+        "type": "local"
+      },
+      {
+        "tag": "remote-dns",
+        "type": "https",
+        "server": "1.1.1.1",
+        "path": "/dns-query",
+        "detour": "proxy"
+      },
+      {
+        "tag": "direct-dns",
+        "type": "https",
+        "server": "223.5.5.5",
+        "path": "/dns-query"
+      }
+    ],
+    "strategy": "ipv4_only",
+    "rules": [
+      {
+        "domain_suffix": [
+          ".cn",
+          ".baidu.com",
+          ".qq.com",
+          ".taobao.com",
+          ".jd.com",
+          ".alipay.com"
+        ],
+        "server": "direct-dns"
+      }
+    ],
+    "final": "remote-dns"
+  },
+  "endpoints": [
+    {
+      "type": "wireguard",
+      "tag": "wireguard",
+      "address": [
+        "10.0.0.2/32",
+        "fd00::2/128"
+      ],
+      "private_key": "iIGbFKdo9vdiXQQRQCtAdstbfI7edqrHIn8XgE0X0EI=",
+      "peers": [
+        {
+          "address": "127.0.0.1",
+          "port": 19194,
+          "public_key": "ZKw+L8OgzvCHV9VGZCBdPNqernMi0E+aRp2m177c1lQ=",
+          "allowed_ips": [
+            "0.0.0.0/0",
+            "::/0"
+          ],
+          "pre_shared_key": "AMa/l+dkp3gwvM3rFsm8ZKzpBbfJJWGbdRA22wrSFjs=",
+          "reserved": [
+            1,
+            2,
+            3
+          ],
+          "persistent_keepalive_interval": 25
+        }
+      ],
+      "mtu": 1408
+    }
+  ],
+  "inbounds": [
+    {
+      "type": "mixed",
+      "tag": "mixed-in",
+      "listen": "127.0.0.1",
+      "listen_port": 7890
+    },
+    {
+      "type": "tun",
+      "tag": "tun-in",
+      "address": [
+        "198.18.0.1/30",
+        "fd19:8180:9a3f::1/126"
+      ],
+      "auto_route": true,
+      "strict_route": true,
+      "interface_name": "awesome-tun0",
+      "mtu": 9000,
+      "stack": "mixed"
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "selector",
+      "tag": "proxy",
+      "outbounds": [
+        "auto",
+        "direct",
+        "vmess-ws-tls",
+        "vmess-grpc-utls",
+        "vmess-tcp",
+        "vless-reality-vision",
+        "trojan-tls",
+        "ss-aes-256-gcm",
+        "ss-2022-blake3-aes-128-gcm",
+        "hy2-salamander-hop",
+        "hy2-gecko",
+        "tuic-v5",
+        "anytls",
+        "shadowtls-v3",
+        "wireguard",
+        "dup",
+        "dup-1"
+      ],
+      "default": "vmess-ws-tls",
+      "interrupt_exist_connections": true
+    },
+    {
+      "type": "urltest",
+      "tag": "auto",
+      "outbounds": [
+        "vmess-ws-tls",
+        "vmess-grpc-utls",
+        "vmess-tcp",
+        "vless-reality-vision",
+        "trojan-tls",
+        "ss-aes-256-gcm",
+        "ss-2022-blake3-aes-128-gcm",
+        "hy2-salamander-hop",
+        "hy2-gecko",
+        "tuic-v5",
+        "anytls",
+        "shadowtls-v3",
+        "wireguard",
+        "dup",
+        "dup-1"
+      ],
+      "url": "https://cp.cloudflare.com/generate_204",
+      "interval": "3m",
+      "tolerance": 50
+    },
+    {
+      "type": "vmess",
+      "tag": "vmess-ws-tls",
+      "server": "127.0.0.1",
+      "server_port": 19193,
+      "uuid": "2420e4a1-e97c-4780-a7a0-f47b2a402ba7",
+      "alter_id": 0,
+      "security": "auto",
+      "tls": {
+        "enabled": true,
+        "server_name": "example.com"
+      },
+      "transport": {
+        "type": "ws",
+        "path": "/ws",
+        "headers": {
+          "Host": "example.com"
+        }
+      }
+    },
+    {
+      "type": "vmess",
+      "tag": "vmess-grpc-utls",
+      "server": "127.0.0.1",
+      "server_port": 19194,
+      "uuid": "2420e4a1-e97c-4780-a7a0-f47b2a402ba7",
+      "alter_id": 0,
+      "security": "auto",
+      "tls": {
+        "enabled": true,
+        "server_name": "example.com",
+        "utls": {
+          "enabled": true,
+          "fingerprint": "chrome"
+        }
+      },
+      "transport": {
+        "type": "grpc",
+        "service_name": "grpc-svc"
+      }
+    },
+    {
+      "type": "vmess",
+      "tag": "vmess-tcp",
+      "server": "127.0.0.1",
+      "server_port": 19195,
+      "uuid": "2420e4a1-e97c-4780-a7a0-f47b2a402ba7",
+      "alter_id": 0,
+      "security": "auto"
+    },
+    {
+      "type": "vless",
+      "tag": "vless-reality-vision",
+      "server": "127.0.0.1",
+      "server_port": 19196,
+      "uuid": "2420e4a1-e97c-4780-a7a0-f47b2a402ba7",
+      "flow": "xtls-rprx-vision",
+      "tls": {
+        "enabled": true,
+        "server_name": "www.example.com",
+        "reality": {
+          "enabled": true,
+          "public_key": "WtyFbF5JOHxY52iYnUbP15Zy4t_AdUGN0Nu5S5t9JEo",
+          "short_id": "0123abcd"
+        },
+        "utls": {
+          "enabled": true,
+          "fingerprint": "chrome"
+        }
+      }
+    },
+    {
+      "type": "trojan",
+      "tag": "trojan-tls",
+      "server": "127.0.0.1",
+      "server_port": 19197,
+      "password": "trojan-password",
+      "tls": {
+        "enabled": true,
+        "server_name": "example.com"
+      }
+    },
+    {
+      "type": "shadowsocks",
+      "tag": "ss-aes-256-gcm",
+      "server": "127.0.0.1",
+      "server_port": 19198,
+      "method": "aes-256-gcm",
+      "password": "ss-password"
+    },
+    {
+      "type": "shadowsocks",
+      "tag": "ss-2022-blake3-aes-128-gcm",
+      "server": "127.0.0.1",
+      "server_port": 19199,
+      "method": "2022-blake3-aes-128-gcm",
+      "password": "oU4dz5lCiAHOgjTzhuNBLw=="
+    },
+    {
+      "type": "hysteria2",
+      "tag": "hy2-salamander-hop",
+      "server": "127.0.0.1",
+      "password": "hy2-password",
+      "tls": {
+        "enabled": true,
+        "server_name": "example.com"
+      },
+      "server_ports": [
+        "19196:19198"
+      ],
+      "hop_interval": "30s",
+      "obfs": {
+        "type": "salamander",
+        "password": "salamander-password"
+      },
+      "up_mbps": 50,
+      "down_mbps": 200,
+      "disable_chrome_parrot": true
+    },
+    {
+      "type": "hysteria2",
+      "tag": "hy2-gecko",
+      "server": "127.0.0.1",
+      "password": "hy2-password",
+      "tls": {
+        "enabled": true,
+        "server_name": "example.com"
+      },
+      "server_port": 19197,
+      "obfs": {
+        "type": "gecko",
+        "password": "gecko-password"
+      }
+    },
+    {
+      "type": "tuic",
+      "tag": "tuic-v5",
+      "server": "127.0.0.1",
+      "server_port": 19198,
+      "uuid": "2420e4a1-e97c-4780-a7a0-f47b2a402ba7",
+      "tls": {
+        "enabled": true,
+        "server_name": "example.com"
+      },
+      "password": "tuic-password",
+      "congestion_control": "bbr",
+      "udp_relay_mode": "native"
+    },
+    {
+      "type": "anytls",
+      "tag": "anytls",
+      "server": "127.0.0.1",
+      "server_port": 19199,
+      "password": "anytls-password",
+      "tls": {
+        "enabled": true,
+        "server_name": "example.com"
+      }
+    },
+    {
+      "type": "shadowsocks",
+      "tag": "shadowtls-v3",
+      "method": "aes-128-gcm",
+      "password": "inner-ss-password",
+      "detour": "shadowtls:shadowtls-v3"
+    },
+    {
+      "type": "shadowtls",
+      "tag": "shadowtls:shadowtls-v3",
+      "server": "127.0.0.1",
+      "server_port": 19193,
+      "version": 3,
+      "tls": {
+        "enabled": true,
+        "server_name": "www.example.com"
+      },
+      "password": "shadowtls-password"
+    },
+    {
+      "type": "shadowsocks",
+      "tag": "dup",
+      "server": "127.0.0.1",
+      "server_port": 19198,
+      "method": "aes-128-gcm",
+      "password": "dup-password-a"
+    },
+    {
+      "type": "shadowsocks",
+      "tag": "dup-1",
+      "server": "127.0.0.1",
+      "server_port": 19199,
+      "method": "aes-128-gcm",
+      "password": "dup-password-b"
+    },
+    {
+      "type": "direct",
+      "tag": "direct"
+    }
+  ],
+  "route": {
+    "rules": [
+      {
+        "action": "sniff"
+      },
+      {
+        "protocol": "dns",
+        "action": "hijack-dns"
+      },
+      {
+        "domain": [
+          "localhost"
+        ],
+        "action": "resolve",
+        "server": "hosts-dns"
+      },
+      {
+        "ip_is_private": true,
+        "outbound": "direct"
+      },
+      {
+        "domain": [
+          "localhost"
+        ],
+        "domain_suffix": [
+          ".localhost",
+          ".local",
+          ".internal",
+          ".lan",
+          ".home.arpa"
+        ],
+        "domain_regex": [
+          "^[^.]+$"
+        ],
+        "outbound": "direct"
+      },
+      {
+        "ip_version": 6,
+        "action": "resolve",
+        "strategy": "ipv4_only"
+      },
+      {
+        "ip_version": 6,
+        "action": "reject"
+      },
+      {
+        "domain_suffix": [
+          ".cn",
+          ".baidu.com",
+          ".qq.com",
+          ".taobao.com",
+          ".jd.com",
+          ".alipay.com"
+        ],
+        "outbound": "direct"
+      }
+    ],
+    "rule_set": [],
+    "auto_detect_interface": true,
+    "default_domain_resolver": {
+      "server": "local-dns",
+      "strategy": "prefer_ipv4"
+    },
+    "final": "proxy"
+  },
+  "experimental": {
+    "clash_api": {
+      "external_controller": "127.0.0.1:19191",
+      "external_ui": "",
+      "secret": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    "cache_file": {
+      "enabled": true,
+      "path": "C:\\awesome-proxy-test\\cache.db"
+    }
+  }
+}

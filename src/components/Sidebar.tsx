@@ -1,6 +1,7 @@
 import React from 'react';
 import { LayoutDashboard, Globe, Rss, Settings, FileText, Wifi, WifiOff, Loader2 } from './Icons';
 import { useNodeStore } from '../store/nodeStore';
+import { useAppUpdateStore } from '../store/appUpdateStore';
 import type { Page } from '../App';
 
 interface SidebarProps {
@@ -20,6 +21,10 @@ export default function Sidebar({ currentPage, onNavigate }: SidebarProps) {
   const connectionStatus = useNodeStore((s) => s.connectionStatus);
   const nodes = useNodeStore((s) => s.nodes);
   const selectedIndex = useNodeStore((s) => s.selectedIndex);
+  const updateState = useAppUpdateStore((s) => s.status.state);
+  // The only startup-check notification: a dot, never a popup or a download.
+  const updatePending =
+    updateState === 'available' || updateState === 'downloading' || updateState === 'downloaded';
 
   const selectedNode = selectedIndex >= 0 && selectedIndex < nodes.length ? nodes[selectedIndex] : null;
 
@@ -73,6 +78,12 @@ export default function Sidebar({ currentPage, onNavigate }: SidebarProps) {
           >
             {item.icon}
             <span>{item.label}</span>
+            {item.id === 'settings' && updatePending && (
+              <span className="ml-auto flex items-center" title="An update for Awesome Proxy is available">
+                <span aria-hidden="true" className="w-2 h-2 rounded-full bg-primary-500" />
+                <span className="sr-only">Update available</span>
+              </span>
+            )}
           </button>
         ))}
       </nav>
